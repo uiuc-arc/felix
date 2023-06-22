@@ -663,6 +663,7 @@ TVM_DLL PrimExpr likely(PrimExpr cond, Span span = Span());
  * \param span The location of this operation in the source.
  */
 TVM_DLL PrimExpr pow(PrimExpr x, PrimExpr y, Span span = Span());
+
 /*!
  * \brief Calculate absolute value of x.
  * \param x The input data
@@ -834,6 +835,8 @@ TVM_DLL PrimExpr LargeUIntImm(DataType dtype, int64_t low, int64_t high, Span sp
 TVM_DLL PrimExpr q_multiply_shift(PrimExpr x, PrimExpr y, PrimExpr q, PrimExpr s,
                                   Span span = Span());
 
+TVM_DLL PrimExpr select(PrimExpr cond, PrimExpr x, PrimExpr y, Span span = Span());
+
 // Intrinsic operators
 #define TVM_DECLARE_INTRIN_UNARY(OpName)                   \
   inline PrimExpr OpName(PrimExpr x, Span span = Span()) { \
@@ -865,6 +868,7 @@ TVM_DECLARE_INTRIN_UNARY(acosh);
 TVM_DECLARE_INTRIN_UNARY(asinh);
 TVM_DECLARE_INTRIN_UNARY(atanh);
 TVM_DECLARE_INTRIN_UNARY(clz);
+TVM_DECLARE_INTRIN_UNARY(hump);
 
 #define TVM_DECLARE_INTRIN_BINARY(OpName)                              \
   inline PrimExpr OpName(PrimExpr x, PrimExpr y, Span span = Span()) { \
@@ -873,6 +877,7 @@ TVM_DECLARE_INTRIN_UNARY(clz);
   }
 
 TVM_DECLARE_INTRIN_BINARY(atan2);
+TVM_DECLARE_INTRIN_BINARY(logk);
 TVM_DECLARE_INTRIN_BINARY(nextafter);
 TVM_DECLARE_INTRIN_BINARY(copysign);
 TVM_DECLARE_INTRIN_BINARY(hypot);

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.13)
 project(tvm C CXX)
 
 # Utility functions
@@ -519,6 +519,9 @@ if(USE_MICRO)
   add_dependencies(tvm_runtime zephyr)
   add_dependencies(tvm_runtime arduino)
 endif()
+
+# Additional Rust library there to be built and linked with TVM.
+add_subdirectory("src/arith")
 
 if(USE_CPP_RPC)
   add_subdirectory("apps/cpp_rpc")

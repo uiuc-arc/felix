@@ -819,6 +819,15 @@ PrimExpr trunc(PrimExpr x, Span span) {
   return tir::Call(x.dtype(), op, {x}, span);
 }
 
+// select
+PrimExpr select(PrimExpr cond, PrimExpr x, PrimExpr y, Span span) {
+  ICHECK(cond.dtype().is_bool());
+  if (auto* cond_const = cond.as<IntImmNode>()) {
+    return cond_const->value ? x : y;
+  }
+  return tir::Select(cond, x, y, span);
+}
+
 TIR_REGISTER_PURE_UNARY_OP("tir.trunc").set_attr<TVectorizable>("TVectorizable", true);
 
 // unary op registration.

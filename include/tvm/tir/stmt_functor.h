@@ -400,6 +400,22 @@ inline T Substitute(T input, const std::unordered_map<const VarNode*, PrimExpr>&
   return Substitute(std::move(input), vmap);
 }
 
+template <typename T>
+inline T SubstByName(T input, const std::unordered_map<std::string, PrimExpr>& value_map,
+                     bool* changed = nullptr) {
+  auto vmap_fn = [&](const Var& var) -> Optional<PrimExpr> {
+    auto it = value_map.find(var->name_hint);
+    if (it != value_map.end()) {
+      if (changed) {
+        *changed = true;
+      }
+      return (*it).second;
+    }
+    return Optional<PrimExpr>(nullptr);
+  };
+  return Substitute(std::move(input), vmap_fn);
+}
+
 /*!
  * \brief Recursively visit the IR in pre DFS order node, apply fvisit.
  * If fvisit returns false, it won't visit the children of the node.
