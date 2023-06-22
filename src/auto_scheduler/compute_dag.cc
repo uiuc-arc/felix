@@ -25,7 +25,9 @@
 #include <tvm/auto_scheduler/compute_dag.h>
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/search_policy.h>
+#include <tvm/auto_scheduler/search_policy_utils.h>
 #include <tvm/auto_scheduler/transform_step.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/support/parallel_for.h>
 #include <tvm/te/operation.h>
@@ -44,8 +46,6 @@
 
 #include "../arith/pattern_match.h"
 #include "../relay/transforms/auto_scheduler_layout_rewrite.h"
-#include "search_policy/utils.h"
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

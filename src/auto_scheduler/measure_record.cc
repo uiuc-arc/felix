@@ -26,6 +26,7 @@
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/measure_record.h>
 #include <tvm/auto_scheduler/transform_step.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/registry.h>
 
 #include <fstream>
@@ -33,8 +34,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "utils.h"
 
 // Json serialization handler for MeasureInput, MeasureResult
 // (and recursively for SearchTask, State, Step, ...)

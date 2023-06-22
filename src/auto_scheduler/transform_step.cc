@@ -26,6 +26,7 @@
 #include <tvm/auto_scheduler/compute_dag.h>
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/transform_step.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/te/operation.h>
@@ -33,8 +34,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "utils.h"
 
 namespace dmlc {
 namespace json {

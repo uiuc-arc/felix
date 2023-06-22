@@ -35,6 +35,8 @@
 
 #include <tvm/auto_scheduler/cost_model.h>
 #include <tvm/auto_scheduler/search_policy.h>
+#include <tvm/auto_scheduler/sketch_policy_rules.h>
+#include <tvm/auto_scheduler/utils.h>
 
 #include <memory>
 #include <set>
@@ -42,9 +44,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include "sketch_policy_rules.h"
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

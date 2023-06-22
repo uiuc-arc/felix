@@ -27,13 +27,12 @@
 #define TVM_AUTO_SCHEDULER_SEARCH_POLICY_SKETCH_POLICY_RULES_H_
 
 #include <tvm/auto_scheduler/loop_state.h>
+#include <tvm/auto_scheduler/search_policy_utils.h>
 #include <tvm/auto_scheduler/search_task.h>
 
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

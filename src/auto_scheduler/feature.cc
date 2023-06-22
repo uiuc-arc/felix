@@ -26,6 +26,8 @@
 #include <tvm/auto_scheduler/feature.h>
 #include <tvm/auto_scheduler/measure.h>
 #include <tvm/auto_scheduler/measure_record.h>
+#include <tvm/auto_scheduler/search_policy_utils.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/driver/driver_api.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/support/parallel_for.h>
@@ -41,9 +43,6 @@
 #include <numeric>
 #include <unordered_map>
 #include <vector>
-
-#include "search_policy/utils.h"
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

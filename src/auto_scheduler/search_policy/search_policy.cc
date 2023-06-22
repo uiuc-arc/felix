@@ -24,9 +24,8 @@
 
 #include <tvm/auto_scheduler/measure_record.h>
 #include <tvm/auto_scheduler/search_policy.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/registry.h>
-
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

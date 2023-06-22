@@ -23,14 +23,13 @@
  * population in SketchPolicy.
  */
 
-#include "sketch_policy_rules.h"
+#include <tvm/auto_scheduler/sketch_policy.h>
+#include <tvm/auto_scheduler/sketch_policy_rules.h>
 
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "sketch_policy.h"
 
 namespace tvm {
 namespace auto_scheduler {

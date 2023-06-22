@@ -26,12 +26,11 @@
 #include <tvm/auto_scheduler/compute_dag.h>
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/transform_step.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/te/operation.h>
 
 #include <utility>
-
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

@@ -23,9 +23,8 @@
  */
 
 #include <tvm/auto_scheduler/auto_schedule.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/registry.h>
-
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

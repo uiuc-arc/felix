@@ -26,11 +26,10 @@
 #include "empty_policy.h"
 
 #include <tvm/auto_scheduler/measure.h>
+#include <tvm/auto_scheduler/search_policy_utils.h>
 #include <tvm/runtime/registry.h>
 
 #include <utility>
-
-#include "utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

@@ -22,7 +22,7 @@
  * \brief Common utilities.
  */
 
-#include "utils.h"
+#include <tvm/auto_scheduler/utils.h>
 
 namespace tvm {
 namespace auto_scheduler {

@@ -28,6 +28,7 @@
 #include <dmlc/common.h>
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/search_policy.h>
+#include <tvm/auto_scheduler/utils.h>
 #include <tvm/ir/expr.h>
 #include <tvm/te/operation.h>
 
@@ -40,8 +41,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include "../utils.h"
 
 namespace tvm {
 namespace auto_scheduler {

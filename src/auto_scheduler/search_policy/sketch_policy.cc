@@ -24,8 +24,8 @@
  * and use evolutionary search to fine-tune them.
  */
 
-#include "sketch_policy.h"
-
+#include <tvm/auto_scheduler/sketch_policy.h>
+#include <tvm/auto_scheduler/sketch_policy_rules.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/support/parallel_for.h>
 
@@ -40,8 +40,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include "sketch_policy_rules.h"
 
 namespace tvm {
 namespace auto_scheduler {

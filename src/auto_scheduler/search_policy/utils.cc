@@ -22,7 +22,7 @@
  * \brief Common utilities
  */
 
-#include "utils.h"
+#include <tvm/auto_scheduler/search_policy_utils.h>
 
 #include <algorithm>
 
