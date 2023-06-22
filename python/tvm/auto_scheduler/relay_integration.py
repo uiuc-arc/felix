@@ -298,10 +298,10 @@ def traverse_to_get_io_tensors(outs):
         traverse(t)
 
     io_tensors = inputs + list(outs)
-    for tensor in io_tensors:
-        # Reject the compute if any of its I/O tensors has dynamic shape.
-        if any([not isinstance(v, int) for v in get_const_tuple(tensor.shape)]):
-            return ([], False, False)
+    # for tensor in io_tensors:
+    #     # Reject the compute if any of its I/O tensors has dynamic shape.
+    #     if any([not isinstance(v, int) for v in get_const_tuple(tensor.shape)]):
+    #         return ([], False, False)
 
     return (io_tensors, len(layout_free_ops) > 0, has_complex_op)
 
@@ -329,13 +329,11 @@ def auto_schedule_topi(func_name, outs):
     """
 
     # pylint: disable=import-outside-toplevel
-    from tvm.auto_scheduler.measure import (
+    from tvm.auto_scheduler.measure import (  # lazily import to avoid recursive dependency
         prepare_input_map,
-    )  # lazily import to avoid recursive dependency
+    )
 
     io_tensors, has_layout_free, has_complex_op = traverse_to_get_io_tensors(outs)
-    if not io_tensors:  # The compute includes dynamic shapes which are not supported yet.
-        return None
 
     try:
         dag = ComputeDAG(io_tensors)

@@ -177,6 +177,7 @@ class ComputeDAGNode : public Object {
   Array<te::Operation> ops;
   /*! \brief The number of float operations in this ComputeDAG. */
   double flop_ct;
+  PrimExpr flop_ct_expr;
   /*! \brief The initial state without any transform steps. */
   State init_state;
   /*! \brief The static read-write access analyzer. */
@@ -186,8 +187,19 @@ class ComputeDAGNode : public Object {
     v->Visit("tensors", &tensors);
     v->Visit("ops", &ops);
     v->Visit("flop_ct", &flop_ct);
+    v->Visit("flop_ct_expr", &flop_ct_expr);
     v->Visit("init_state", &init_state);
     v->Visit("access_analyzer", &access_analyzer);
+  }
+
+  void SetFLOPs(PrimExpr flop_ct_expr) {
+    auto* flop_ct_int = flop_ct_expr.as<IntImmNode>();
+    if (flop_ct_int) {
+      this->flop_ct = flop_ct_int->value;
+    } else {
+      this->flop_ct = -1.0;
+      this->flop_ct_expr = flop_ct_expr;
+    }
   }
 
   static constexpr const char* _type_key = "auto_scheduler.ComputeDAG";

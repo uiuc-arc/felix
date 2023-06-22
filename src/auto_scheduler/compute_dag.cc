@@ -373,7 +373,8 @@ AccessAnalyzer::AccessAnalyzer(const Array<te::Tensor>& tensors) {
         }
 
         for (const auto& axis : cop->axis) {
-          if (GetIntImm(axis->dom->extent) > 1 && vars.count(axis->var.get()) == 0) {
+          auto* extent = axis->dom->extent.as<IntImmNode>();
+          if ((!extent || extent->value > 1) && vars.count(axis->var.get()) == 0) {
             n_missing++;
             break;
           }
@@ -519,12 +520,12 @@ bool AccessAnalyzer::ElementWiseMatch(const te::Operation& op,
 
     Array<PrimExpr> output_shape = p_cur->output_shape(0);
     for (int i = 1; i < p_cur->num_outputs(); ++i) {
-      if (!IntArrayEqual(p_cur->output_shape(i), output_shape)) {
+      if (!IntOrVarArrayEqual(p_cur->output_shape(i), output_shape)) {
         return false;
       }
     }
     for (int i = 0; i < p_next->num_outputs(); ++i) {
-      if (!IntArrayEqual(p_next->output_shape(i), output_shape)) {
+      if (!IntOrVarArrayEqual(p_next->output_shape(i), output_shape)) {
         return false;
       }
     }
@@ -546,26 +547,20 @@ bool AccessAnalyzer::ElementWiseMatch(const te::Operation& op,
 }
 
 // Estimate the number of float operations in an expression
-class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
+class FlopEstimator : public ExprFunctor<PrimExpr(const PrimExpr& n)> {
  public:
-  double EstimateFlop(const Array<te::Operation>& ops) {
-    double ret = 0;
+  PrimExpr EstimateFlop(const Array<te::Operation>& ops) {
+    PrimExpr ret = 0;
     for (const auto& op : ops) {
       if (auto pop = op.as<te::ComputeOpNode>()) {
         if (pop->attrs.count("FLOP")) {
           // Use user-provided FLOP
-          auto pint = pop->attrs["FLOP"].as<IntImmNode>();
-          ICHECK(pint != nullptr);
-          ret += pint->value;
+          ret += Downcast<PrimExpr>(pop->attrs["FLOP"]);
         } else {
           // Estimate by parsing the compute body
-          double num_element = AxisLengthProd(pop->axis);
-          if (num_element == -1) {
-            fail_ = true;
-            break;
-          }
+          PrimExpr num_element = AxisLengthProd(pop->axis);
           cur_type_code_ = pop->output_dtype(0).code();
-          double op_per_element = 0;
+          PrimExpr op_per_element = 0;
           for (const auto& x : pop->body) {
             op_per_element += VisitExpr(x);
           }
@@ -581,17 +576,12 @@ class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
     return fail_ ? -1 : ret;
   }
 
-  double VisitExpr_(const ReduceNode* op) final {
-    uint64_t num_iter = 1;
+  PrimExpr VisitExpr_(const ReduceNode* op) final {
+    PrimExpr num_iter = 1;
     for (const auto& x : op->axis) {
-      if (auto imm = x->dom->extent.as<IntImmNode>()) {
-        num_iter *= imm->value;
-      } else {
-        fail_ = true;
-        num_iter = -1;
-      }
+      num_iter *= x->dom->extent;
     }
-    double body_flop = 0;
+    PrimExpr body_flop = 0;
     for (size_t i = 0; i < op->combiner->result.size(); ++i) {
       body_flop += VisitExpr(op->combiner->result[i]);
       body_flop += VisitExpr(op->source[i]);
@@ -599,32 +589,32 @@ class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
     return num_iter * body_flop;
   }
 
-  double VisitExpr_(const FloatImmNode* op) final { return 0.0; }
-  double VisitExpr_(const IntImmNode* op) final { return 0.0; }
-  double VisitExpr_(const ProducerLoadNode* op) final { return 0.0; }
+  PrimExpr VisitExpr_(const FloatImmNode* op) final { return 0; }
+  PrimExpr VisitExpr_(const IntImmNode* op) final { return 0; }
+  PrimExpr VisitExpr_(const ProducerLoadNode* op) final { return 0; }
 
-  double VisitExpr_(const CastNode* op) final { return VisitExpr(op->value); }
-  double VisitExpr_(const VarNode* op) final { return 0.0; }
+  PrimExpr VisitExpr_(const CastNode* op) final { return VisitExpr(op->value); }
+  PrimExpr VisitExpr_(const VarNode* op) final { return 0; }
 
-  double VisitExpr_(const SelectNode* op) final {
+  PrimExpr VisitExpr_(const SelectNode* op) final {
     return VisitExpr(op->condition) +
-           std::max(VisitExpr(op->true_value), VisitExpr(op->false_value));
+           tvm::max(VisitExpr(op->true_value), VisitExpr(op->false_value));
   }
 
 // Index calculations (e.g., the "i + j" expression in A[i + j]) are not counted in FLOPS.
 #define VisitBinary(Node)                                                                     \
-  double VisitExpr_(const Node* op) final {                                                   \
-    double base = 1.0;                                                                        \
+  PrimExpr VisitExpr_(const Node* op) final {                                                 \
+    int base = 1;                                                                             \
     if ((op->a->dtype.code() != cur_type_code_) && (op->b->dtype.code() != cur_type_code_)) { \
-      base = 0.0;                                                                             \
+      base = 0;                                                                               \
     }                                                                                         \
     return base + VisitExpr(op->a) + VisitExpr(op->b);                                        \
   }
 
-#define VisitUnary(Node)                                          \
-  double VisitExpr_(const Node* op) final {                       \
-    double base = op->dtype.code() == cur_type_code_ ? 1.0 : 0.0; \
-    return base + VisitExpr(op->a);                               \
+#define VisitUnary(Node)                                   \
+  PrimExpr VisitExpr_(const Node* op) final {              \
+    int base = op->dtype.code() == cur_type_code_ ? 1 : 0; \
+    return base + VisitExpr(op->a);                        \
   }
 
   VisitBinary(AddNode);
@@ -646,17 +636,17 @@ class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
   VisitBinary(OrNode);
   VisitUnary(NotNode);
 
-  double VisitExpr_(const CallNode* op) final {
-    double ret = 0.0;
+  PrimExpr VisitExpr_(const CallNode* op) final {
+    PrimExpr ret = 0;
     for (const auto& x : op->args) {
       ret += VisitExpr(x);
     }
     return ret;
   }
 
-  double VisitExprDefault_(const Object* op) final {
+  PrimExpr VisitExprDefault_(const Object* op) final {
     fail_ = true;
-    return -1.0;
+    return -1;
   }
 
  private:
@@ -699,7 +689,7 @@ ComputeDAG::ComputeDAG(Array<te::Tensor> tensors) {
   // Make sure it is a valid compute definition
   CheckComputeValidity(sch);
 
-  node->flop_ct = FlopEstimator().EstimateFlop(node->ops);
+  node->SetFLOPs(FlopEstimator().EstimateFlop(node->ops));
   node->init_state = State(node->ops);
   data_ = std::move(node);
 }
@@ -726,7 +716,7 @@ ComputeDAG::ComputeDAG(const te::Schedule& sch) {
   }
   node->tensors = std::move(tensors);
   node->access_analyzer = AccessAnalyzer(node->tensors);
-  node->flop_ct = FlopEstimator().EstimateFlop(node->ops);
+  node->SetFLOPs(FlopEstimator().EstimateFlop(node->ops));
   node->init_state = State(node->ops);
   data_ = std::move(node);
 }
@@ -1138,7 +1128,7 @@ ComputeDAG ComputeDAG::RewriteLayout(Array<Step>* transform_steps,
   for (auto stage : sch->stages) {
     p_dag->ops.push_back(stage->op);
   }
-  p_dag->flop_ct = FlopEstimator().EstimateFlop(p_dag->ops);
+  p_dag->SetFLOPs(FlopEstimator().EstimateFlop(p_dag->ops));
   p_dag->init_state = State(p_dag->ops);
 
   return new_dag;

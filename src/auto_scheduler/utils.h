@@ -26,7 +26,9 @@
 #define TVM_AUTO_SCHEDULER_UTILS_H_
 
 #include <dmlc/common.h>
+#include <tvm/arith/analyzer.h>
 #include <tvm/tir/expr.h>
+#include <tvm/tir/op.h>
 
 #include <algorithm>
 #include <deque>
@@ -143,17 +145,22 @@ inline void StrReplace(std::string* base, const std::string& from, const std::st
 }
 
 /*! \brief Return whether two int arrays are elementwise-equal */
-inline bool IntArrayEqual(const Array<PrimExpr>& arr1, const Array<PrimExpr>& arr2) {
+inline bool IntOrVarArrayEqual(const Array<PrimExpr>& arr1, const Array<PrimExpr>& arr2) {
   if (arr1.size() != arr2.size()) {
     return false;
   }
 
+  arith::Analyzer analyzer;
   for (size_t i = 0; i < arr1.size(); ++i) {
-    auto int1 = arr1[i].as<IntImmNode>();
-    auto int2 = arr2[i].as<IntImmNode>();
-    ICHECK(int1 != nullptr);
-    ICHECK(int2 != nullptr);
-    if (int1->value != int2->value) {
+    auto int1 = arr1[i].as<IntImmNode>(), int2 = arr2[i].as<IntImmNode>();
+    if (int1) {
+      ICHECK(int2);
+      if (int1->value != int2->value) {
+        return false;
+      }
+      continue;
+    }
+    if (!StructuralEqual()(arr1[i], arr2[i]) && !analyzer.CanProveEqual(arr1[i], arr2[i])) {
       return false;
     }
   }
@@ -197,14 +204,10 @@ inline int64_t GetIntImm(const PrimExpr& expr) {
 }
 
 /*! \brief Compute the product of the lengths of axes */
-inline int64_t AxisLengthProd(const Array<tir::IterVar>& axes) {
-  int64_t ret = 1.0;
+inline PrimExpr AxisLengthProd(const Array<tir::IterVar>& axes) {
+  PrimExpr ret = Integer(1);
   for (const auto& x : axes) {
-    if (const IntImmNode* imm = x->dom->extent.as<IntImmNode>()) {
-      ret *= imm->value;
-    } else {
-      return -1.0;
-    }
+    ret *= x->dom->extent;
   }
   return ret;
 }
