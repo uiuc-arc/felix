@@ -281,8 +281,8 @@ void State::reorder(int stage_id, const Array<Iterator>& order) {
   step->ApplyToState(this);
 }
 
-Array<Iterator> State::split(int stage_id, const Iterator& it,
-                             const Array<Optional<Integer>>& lengths, bool inner_to_outer) {
+Array<Iterator> State::split(int stage_id, const Iterator& it, const Array<PrimExpr>& lengths,
+                             bool inner_to_outer) {
   const Stage& stage = operator->()->stages[stage_id];
   SplitStep step =
       SplitStep(stage_id, GetIndex(stage->iters, it),
@@ -362,11 +362,13 @@ void PrintStage(std::ostream* os, int stage_id, const State& state, size_t base_
                 bool delete_trivial_loop) {
   const Stage& stage = state->stages[stage_id];
 
-  if (stage->attrs.auto_unroll_max_step != 0) {
+  auto unroll = stage->attrs.auto_unroll_max_step;
+  auto const_unroll = unroll.as<IntImmNode>();
+  if (!const_unroll || const_unroll->value != 0) {
     for (size_t j = 0; j < base_indent; ++j) {
       *os << " ";
     }
-    *os << stage->op->name << " auto_unroll: " << stage->attrs.auto_unroll_max_step << "\n";
+    *os << stage->op->name << " auto_unroll: " << unroll << "\n";
   }
   if (stage->attrs.storage_offset != 0) {
     for (size_t j = 0; j < base_indent; ++j) {
@@ -508,7 +510,7 @@ TVM_REGISTER_GLOBAL("auto_scheduler.StateReorder")
 
 TVM_REGISTER_GLOBAL("auto_scheduler.StateSplit")
     .set_body_typed([](State state, int stage_id, const Iterator& it,
-                       const Array<Optional<Integer>>& lengths, bool inner_to_outer) {
+                       const Array<PrimExpr>& lengths, bool inner_to_outer) {
       const auto& res = state.split(stage_id, it, lengths, inner_to_outer);
       return Array<ObjectRef>{state, res};
     });

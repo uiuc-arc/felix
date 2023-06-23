@@ -251,6 +251,7 @@ assign_source_group("Include" ${GROUP_INCLUDE})
 tvm_file_glob(GLOB_RECURSE COMPILER_SRCS
     src/auto_scheduler/*.cc
     src/meta_schedule/*.cc
+    src/felix/*.cc
     src/node/*.cc
     src/ir/*.cc
     src/arith/*.cc

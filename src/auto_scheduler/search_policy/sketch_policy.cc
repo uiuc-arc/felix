@@ -368,7 +368,7 @@ Array<State> SketchPolicyNode::GenerateSketches() {
         auto step = pstate->transform_steps[split_step_id].as<SplitStepNode>();
         ICHECK(step != nullptr);
         pstate->transform_steps.Set(
-            split_step_id, SplitStep(step->stage_id, step->iter_id, step->extent, {NullOpt},
+            split_step_id, SplitStep(step->stage_id, step->iter_id, step->extent, {PrimExpr()},
                                      step->inner_to_outer));
       }
     }

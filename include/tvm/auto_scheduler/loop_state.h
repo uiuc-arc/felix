@@ -85,7 +85,7 @@ enum class ComputeAtKind : int {
 /*! \brief Stage-level attributes. */
 struct StageAttributes {
   /*! \brief The maximum steps for the pragma `auto_unroll_max_step`. */
-  int auto_unroll_max_step;
+  PrimExpr auto_unroll_max_step;
   /*! \brief The storage offset for the schedule primitive `storage_align`. */
   int storage_offset;
 };
@@ -355,8 +355,7 @@ class State : public ObjectRef {
    * \note If we do split on an iterator which has stages attached at it(by compute_at), the inner
    * most iterator of split results will become the new attach point.
    */
-  TVM_DLL Array<Iterator> split(int stage_id, const Iterator& it,
-                                const Array<Optional<Integer>>& lengths,
+  TVM_DLL Array<Iterator> split(int stage_id, const Iterator& it, const Array<PrimExpr>& lengths,
                                 bool inner_to_outer = true);
   /*!
    * \brief The schedule primitive similar to split, but uses split factors from previous steps.

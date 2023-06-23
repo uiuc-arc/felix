@@ -182,7 +182,7 @@ State DoMultiLevelTiling(const State& state, int stage_id, const std::string& fo
       levels[0].push_back(iter);
     } else {
       Array<Iterator> split_res =
-          tmp_s.split(stage_id, iter, Array<Optional<Integer>>(size - 1, NullOpt));
+          tmp_s.split(stage_id, iter, Array<PrimExpr>(size - 1, PrimExpr()));
       for (int i = 0; i < size; i++) {
         levels[i].push_back(split_res[i]);
       }

@@ -310,7 +310,7 @@ std::vector<std::pair<State, int>> RuleSimplifyComputeWithConstTensor::Apply(
       // tile other space indices
       ICHECK(iter->iter_kind == IteratorKind::kSpatial);
       tiled_outer_iters.push_back(
-          tmp_s.split(stage_id, iter, Array<Optional<Integer>>(tile_level - 1, NullOpt)));
+          tmp_s.split(stage_id, iter, Array<PrimExpr>(tile_level - 1, PrimExpr())));
     }
   }
 
@@ -502,7 +502,7 @@ PopulationGenerationRule::ResultKind InitFillTileSize::Apply(SketchPolicyNode* p
     if (auto ps = (*state)->transform_steps[step_id].as<SplitStepNode>()) {
       bool all_defined = true;
       for (const auto& len : ps->lengths) {
-        if (!len) {
+        if (!len.defined()) {
           all_defined = false;
           break;
         }
@@ -519,10 +519,9 @@ PopulationGenerationRule::ResultKind InitFillTileSize::Apply(SketchPolicyNode* p
       const auto& candidate_lengths = candidate_lens[(*rand_gen)() % candidate_lens.size()];
 
       pstate->transform_steps.Set(
-          step_id,
-          SplitStep(ps->stage_id, ps->iter_id, ps->extent,
-                    Array<Optional<Integer>>(candidate_lengths.begin(), candidate_lengths.end()),
-                    ps->inner_to_outer));
+          step_id, SplitStep(ps->stage_id, ps->iter_id, ps->extent,
+                             Array<PrimExpr>(candidate_lengths.begin(), candidate_lengths.end()),
+                             ps->inner_to_outer));
     }
   }
   pstate->concrete = true;
@@ -807,7 +806,7 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         Iterator fused_it;
         *state = FuseAllOuterSpaceIterators(*state, stage_id, &fused_it);
 
-        if (GetExtent(fused_it) <= policy->search_task->hardware_params->warp_size) {
+        if (GetIntImm(fused_it->range->extent) <= policy->search_task->hardware_params->warp_size) {
           state->bind(stage_id, fused_it, IteratorAnnotation::kThreadX);
         } else {
           // Set threadIdx.x = default_warp_size by default.
@@ -921,8 +920,7 @@ PopulationGenerationRule::ResultKind MutateTileSize::Apply(SketchPolicyNode* pol
       if (!ps->extent.defined() || !ps->extent.value()->IsInstance<IntImmNode>()) {
         continue;
       }
-      auto innermost_factor = ps->lengths.back().value_or(max_innermost_split_factor + 1);
-      if (GetIntImm(innermost_factor) <= max_innermost_split_factor) {
+      if (GetIntImm(ps->lengths.back()) <= max_innermost_split_factor) {
         split_step_ids.push_back(i);
       }
     }
@@ -954,7 +952,7 @@ PopulationGenerationRule::ResultKind MutateTileSize::Apply(SketchPolicyNode* pol
   // Fetch the current tile sizes.
   std::vector<int> lengths(ps->lengths.size() + 1, 1);
   for (int i = 0; i < static_cast<int>(ps->lengths.size()); ++i) {
-    lengths[i + 1] = GetIntImm(ps->lengths[i].value());
+    lengths[i + 1] = GetIntImm(ps->lengths[i]);
   }
   lengths[0] = extent / ElementProduct(lengths);
 
@@ -1009,9 +1007,9 @@ PopulationGenerationRule::ResultKind MutateTileSize::Apply(SketchPolicyNode* pol
 
     StateNode* pstate = state->CopyOnWrite();
     pstate->transform_steps.Set(
-        step_id, SplitStep(ps->stage_id, ps->iter_id, ps->extent,
-                           Array<Optional<Integer>>(new_lengths.begin(), new_lengths.end()),
-                           ps->inner_to_outer));
+        step_id,
+        SplitStep(ps->stage_id, ps->iter_id, ps->extent,
+                  Array<PrimExpr>(new_lengths.begin(), new_lengths.end()), ps->inner_to_outer));
     return ResultKind::kValid;
   }
   return ResultKind::kInvalid;

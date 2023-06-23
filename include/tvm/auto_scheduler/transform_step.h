@@ -505,7 +505,7 @@ class SplitStepNode : public StepNode {
   /*! \brief The extent length of the axis to split. */
   Optional<PrimExpr> extent;
   /*! \brief The split factors. */
-  Array<Optional<Integer>> lengths;
+  Array<PrimExpr> lengths;
   /*!
    * \brief If true, the `lengths` denote the lengths of iterators
    * from inner level to outer level
@@ -560,8 +560,8 @@ class SplitStep : public Step {
    * \param lengths The multiple split factors. Can be None to be filled by search policy.
    * \param inner_to_outer The split direction.
    */
-  SplitStep(int stage_id, int iter_id, Optional<PrimExpr> extent,
-            const Array<Optional<Integer>>& lengths, bool inner_to_outer);
+  SplitStep(int stage_id, int iter_id, Optional<PrimExpr> extent, const Array<PrimExpr>& lengths,
+            bool inner_to_outer);
 
   /*!
    * \brief The constructor used to read a step record from JSONReader and create the
@@ -591,7 +591,7 @@ class FollowSplitStepNode : public StepNode {
    * \param transform_steps An array of history transform steps.
    * \return The multiple split factors.
    */
-  Array<Optional<Integer>> ExtractSplitLengths(const Array<Step>& transform_steps) const;
+  Array<PrimExpr> ExtractSplitLengths(const Array<Step>& transform_steps) const;
 
   /*!
    * \brief Apply the current step to State.
@@ -672,7 +672,7 @@ class FollowFusedSplitStepNode : public StepNode {
    * \param transform_steps An array of history transform steps.
    * \return Split factor.
    */
-  Optional<Integer> ExtractSplitLength(const Array<Step>& transform_steps) const;
+  PrimExpr ExtractSplitLength(const Array<Step>& transform_steps) const;
 
   /*!
    * \brief Apply the current step to State.

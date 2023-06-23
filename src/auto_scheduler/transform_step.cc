@@ -23,6 +23,7 @@
  *        They are similar to the schedule primitives in te::Stage.
  */
 
+#include <tvm/arith/var_context.h>
 #include <tvm/auto_scheduler/compute_dag.h>
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/transform_step.h>
@@ -662,6 +663,22 @@ void PragmaStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
   writer->WriteString(pragma_type);
 }
 
+bool IsNumber(const std::string& s) {
+  return !s.empty() && std::all_of(s.begin(), s.end(), ::isdigit);
+}
+
+PrimExpr ParseUnrollStep(const std::string& pragma) {
+  size_t pos = pragma.find('$');
+  ICHECK(pos != std::string::npos) << "max step value not found.";
+  std::string num_or_var = pragma.substr(pos + 1);
+  PrimExpr unroll_step;
+  if (IsNumber(num_or_var)) {
+    return std::stoi(num_or_var);
+  } else {
+    return Var(num_or_var, DataType::Int(32));
+  }
+}
+
 void PragmaStepNode::ApplyToState(State* state) const {
   if (pragma_type == "debug_skip_region") {
     StateNode* pstate = state->CopyOnWrite();
@@ -669,14 +686,7 @@ void PragmaStepNode::ApplyToState(State* state) const {
   } else if (StrStartsWith(pragma_type, "auto_unroll_max_step")) {
     StateNode* pstate = state->CopyOnWrite();
     Stage stage = pstate->stages[stage_id];
-    size_t pos = 0;
-    for (; pos < pragma_type.size(); ++pos) {
-      if ((*(pragma_type.c_str() + pos)) == '$') {
-        break;
-      }
-    }
-    ICHECK_LT(pos, pragma_type.size()) << "max step value not found.";
-    stage.CopyOnWrite()->attrs.auto_unroll_max_step = atoi(pragma_type.c_str() + pos + 1);
+    stage.CopyOnWrite()->attrs.auto_unroll_max_step = ParseUnrollStep(pragma_type);
     pstate->stages.Set(stage_id, std::move(stage));
   } else {
     LOG(FATAL) << "Unsupported pragma: " << pragma_type;
@@ -688,16 +698,9 @@ void PragmaStepNode::ApplyToSchedule(Array<te::Stage>* stages,
   te::Stage stage = (*stages)[stage_id];
   const Array<IterVar>& axes = (*stage_to_axes)[stage];
   if (StrStartsWith(pragma_type, "auto_unroll_max_step")) {
-    size_t pos = 0;
-    for (; pos < pragma_type.size(); ++pos) {
-      if ((*(pragma_type.c_str() + pos)) == '$') {
-        break;
-      }
-    }
-    ICHECK_LT(pos, pragma_type.size()) << "max step value not found.";
-    int value = atoi(pragma_type.c_str() + pos + 1);
+    PrimExpr unroll_size = ParseUnrollStep(pragma_type);
     if (iter_id < static_cast<int>(axes.size())) {
-      stage.pragma(axes[iter_id], "auto_unroll_max_step", value);
+      stage.pragma(axes[iter_id], "auto_unroll_max_step", unroll_size);
       stage.pragma(axes[iter_id], "unroll_explicit", true);
     }
   } else {
@@ -817,7 +820,7 @@ String ReorderStepNode::PrintAsPythonAPI(Array<te::Stage>* stages,
 /********** Split **********/
 // common part for SplitStep, FollowSplitStep, and FollowFusedSplitStep
 Array<Iterator> ApplySplitToState(State* state, int stage_id, int iter_id,
-                                  const Array<Optional<Integer>>& lengths, bool inner_to_outer) {
+                                  const Array<PrimExpr>& lengths, bool inner_to_outer) {
   const Stage& stage = (*state)->stages[stage_id];
   const Iterator& it = stage->iters[iter_id];
   size_t old_iter_size = stage->iters.size();
@@ -834,7 +837,7 @@ Array<Iterator> ApplySplitToState(State* state, int stage_id, int iter_id,
 
   Array<Iterator> outs;
   for (size_t i = 0; i < lengths.size(); ++i) {
-    Optional<Integer> l;
+    PrimExpr l;
     String name;
     if (inner_to_outer) {
       l = lengths[lengths.size() - i - 1];
@@ -844,11 +847,11 @@ Array<Iterator> ApplySplitToState(State* state, int stage_id, int iter_id,
       name = it->name + "." + std::to_string(i);
     }
     Iterator res;
-    if (l && tosplit_min && tosplit_extent) {
-      res = Iterator(name, Range::FromMinExtent(tosplit_min.value(), l.value()), it->iter_kind,
+    if (l.defined() && tosplit_min && tosplit_extent) {
+      res = Iterator(name, Range::FromMinExtent(tosplit_min.value(), l), it->iter_kind,
                      IteratorAnnotation::kNone);
       tosplit_min = Integer(0);
-      tosplit_extent = indexdiv(tosplit_extent.value() + l.value() - 1, l.value());
+      tosplit_extent = indexdiv(tosplit_extent.value(), l);
     } else {
       res = Iterator(name, Range(), it->iter_kind, IteratorAnnotation::kNone);
       tosplit_min = NullOpt;
@@ -898,8 +901,8 @@ Array<Iterator> ApplySplitToState(State* state, int stage_id, int iter_id,
 }
 
 Array<IterVar> ApplySplitToSchedule(Array<te::Stage>* stages, StageToAxesMap* stage_to_axes,
-                                    int stage_id, int iter_id,
-                                    const Array<Optional<Integer>>& lengths, bool inner_to_outer) {
+                                    int stage_id, int iter_id, const Array<PrimExpr>& lengths,
+                                    bool inner_to_outer) {
   auto stage = (*stages)[stage_id];
   const Array<IterVar>& axes = stage_to_axes->at(stage);
 
@@ -908,7 +911,7 @@ Array<IterVar> ApplySplitToSchedule(Array<te::Stage>* stages, StageToAxesMap* st
     IterVar outer = axes[iter_id], inner;
     for (int i = static_cast<int>(lengths.size()) - 1; i >= 0; i--) {
       IterVar to_split = outer;
-      stage.split(to_split, lengths[i].value(), &outer, &inner);
+      stage.split(to_split, lengths[i], &outer, &inner);
       outs.push_back(inner);
     }
     outs.push_back(outer);
@@ -916,7 +919,7 @@ Array<IterVar> ApplySplitToSchedule(Array<te::Stage>* stages, StageToAxesMap* st
     IterVar outer, inner = axes[iter_id];
     for (size_t i = 0; i < lengths.size(); i++) {
       IterVar to_split = inner;
-      stage.split_by_nparts(to_split, lengths[i].value(), &outer, &inner);
+      stage.split_by_nparts(to_split, lengths[i], &outer, &inner);
       outs.push_back(outer);
     }
     outs.push_back(inner);
@@ -941,8 +944,7 @@ Array<IterVar> ApplySplitToSchedule(Array<te::Stage>* stages, StageToAxesMap* st
 }
 
 String PrintSplitAsPythonAPI(Array<te::Stage>* stages, StageToAxesMap* stage_to_axes, int stage_id,
-                             int iter_id, const Array<Optional<Integer>>& lengths,
-                             bool inner_to_outer) {
+                             int iter_id, const Array<PrimExpr>& lengths, bool inner_to_outer) {
   const auto& stage = (*stages)[stage_id];
   auto to_split = stage_to_axes->at(stage)[iter_id];
   const auto& func_name = CleanName(stage->op->name);
@@ -973,7 +975,7 @@ String PrintSplitAsPythonAPI(Array<te::Stage>* stages, StageToAxesMap* stage_to_
 }
 
 SplitStep::SplitStep(int stage_id, int iter_id, Optional<PrimExpr> extent,
-                     const Array<Optional<Integer>>& lengths, bool inner_to_outer) {
+                     const Array<PrimExpr>& lengths, bool inner_to_outer) {
   auto node = make_object<SplitStepNode>();
   node->stage_id = stage_id;
   node->extent = extent;
@@ -1001,7 +1003,11 @@ SplitStep::SplitStep(dmlc::JSONReader* reader) {
   }
   s = reader->NextArrayItem();
   ICHECK(s);
-  reader->Read(&node->lengths);
+  std::vector<int> int_lengths;
+  reader->Read(&int_lengths);
+  for (int length : int_lengths) {
+    node->lengths.push_back(Integer(length));
+  }
   s = reader->NextArrayItem();
   ICHECK(s);
   reader->Read(&node->inner_to_outer);
@@ -1014,7 +1020,12 @@ void SplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
   writer->WriteArrayItem(stage_id);
   writer->WriteArrayItem(iter_id);
   writer->WriteArrayItem(extent ? GetIntImm(extent.value()) : 0);
-  writer->WriteArrayItem(lengths);
+  std::vector<int> int_lengths;
+  for (auto& length : lengths) {
+    auto* node = length.as<IntImmNode>();
+    int_lengths.push_back(node ? node->value : 0);
+  }
+  writer->WriteArrayItem(int_lengths);
   writer->WriteArrayItem(static_cast<int>(inner_to_outer));
 }
 
@@ -1051,8 +1062,7 @@ void FollowSplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
   writer->WriteArrayItem(n_split);
 }
 
-Array<Optional<Integer>> FollowSplitStepNode::ExtractSplitLengths(
-    const Array<Step>& transform_steps) const {
+Array<PrimExpr> FollowSplitStepNode::ExtractSplitLengths(const Array<Step>& transform_steps) const {
   // Make sure src_step_id is within the range of transform_steps.
   ICHECK_LT(src_step_id, transform_steps.size());
   auto ps = transform_steps[src_step_id].as<SplitStepNode>();
@@ -1063,7 +1073,7 @@ Array<Optional<Integer>> FollowSplitStepNode::ExtractSplitLengths(
   ICHECK_LE(n_split, ps->lengths.size() + 1);
   ICHECK(ps != nullptr);
 
-  Array<Optional<Integer>> lengths;
+  Array<PrimExpr> lengths;
   lengths.reserve(n_split);
   int j = 0;
   // Get the first (n_split-1) split factors of followed src_step.
@@ -1075,19 +1085,14 @@ Array<Optional<Integer>> FollowSplitStepNode::ExtractSplitLengths(
   // ps->lengths.size()+1.
   PrimExpr last_factor = 1;
   for (; j < static_cast<int>(ps->lengths.size()); ++j) {
-    if (ps->lengths[j]) {
-      last_factor *= ps->lengths[j].value();
+    if (ps->lengths[j].defined()) {
+      last_factor *= ps->lengths[j];
     } else {
       last_factor = PrimExpr();
       break;
     }
   }
-  if (last_factor.defined()) {
-    lengths.push_back(Downcast<Integer>(last_factor));
-  } else {
-    lengths.push_back(NullOpt);
-  }
-
+  lengths.push_back(last_factor);
   return lengths;
 }
 
@@ -1172,8 +1177,7 @@ void FollowFusedSplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
   writer->WriteArrayItem(static_cast<int>(factor_or_nparts));
 }
 
-Optional<Integer> FollowFusedSplitStepNode::ExtractSplitLength(
-    const Array<Step>& transform_steps) const {
+PrimExpr FollowFusedSplitStepNode::ExtractSplitLength(const Array<Step>& transform_steps) const {
   PrimExpr ret(1);
 
   for (int src_step_id : src_step_ids) {
@@ -1182,13 +1186,9 @@ Optional<Integer> FollowFusedSplitStepNode::ExtractSplitLength(
     auto ps = transform_steps[src_step_id].as<SplitStepNode>();
     ICHECK(ps != nullptr);
     // Multiple the splitting factor on corresponding splitting level of src_steps.
-    if (ps->lengths[level] && ret.defined()) {
-      ret *= ps->lengths[level].value();
-    } else {
-      return NullOpt;
-    }
+    ret *= ps->lengths[level];
   }
-  return Downcast<Integer>(ret);
+  return ret;
 }
 
 Array<Iterator> FollowFusedSplitStepNode::ApplyToState(State* state) const {
