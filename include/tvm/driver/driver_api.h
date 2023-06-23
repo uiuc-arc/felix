@@ -29,6 +29,7 @@
 #ifndef TVM_DRIVER_DRIVER_API_H_
 #define TVM_DRIVER_DRIVER_API_H_
 
+#include <tvm/arith/var_context.h>
 #include <tvm/ir/module.h>
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/packed_func.h>
@@ -133,7 +134,8 @@ TVM_DLL IRModule LowerSchedule(te::Schedule sch, const Array<ObjectRef>& args,
  * \return The result module.
  */
 IRModule ScheduleToModule(te::Schedule sch, const Array<ObjectRef>& args, const std::string& name,
-                          const std::unordered_map<te::Tensor, tir::Buffer>& binds);
+                          const std::unordered_map<te::Tensor, tir::Buffer>& binds,
+                          arith::VarContextNode* vcontext = nullptr);
 /*!
  * \brief Build a device and host module for a specific target from an IRModule.
  * \param funcs The functions to be built.

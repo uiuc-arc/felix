@@ -26,6 +26,7 @@
 #define TVM_TE_SCHEDULE_MESSAGE_PASSING_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/var_context.h>
 #include <tvm/te/operation.h>
 #include <tvm/te/schedule.h>
 #include <tvm/tir/expr.h>
@@ -47,7 +48,8 @@ namespace te {
  * \param allow_missing Whether allow missing value.
  */
 void PassDownDomain(const Stage& stage, std::unordered_map<IterVar, Range>* p_state,
-                    arith::Analyzer* analyzer, bool allow_missing = false);
+                    arith::Analyzer* analyzer, bool allow_missing = false,
+                    arith::VarContextNode* vcontext = nullptr);
 
 /*!
  * \param Upward inference of index of each IterVar.

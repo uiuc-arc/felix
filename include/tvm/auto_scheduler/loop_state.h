@@ -49,6 +49,7 @@
 #define TVM_AUTO_SCHEDULER_LOOP_STATE_H_
 
 #include <dmlc/common.h>
+#include <tvm/arith/var_context.h>
 #include <tvm/auto_scheduler/transform_step.h>
 
 #include <functional>
@@ -255,10 +256,13 @@ class StateNode : public Object {
    */
   bool concrete;
 
+  arith::VarContext var_context;
+
   void VisitAttrs(tvm::AttrVisitor* v) {
     v->Visit("stages", &stages);
     v->Visit("transform_steps", &transform_steps);
     v->Visit("concrete", &concrete);
+    v->Visit("var_context", &var_context);
   }
 
   static constexpr const char* _type_key = "auto_scheduler.State";
@@ -284,6 +288,8 @@ class State : public ObjectRef {
    * \return The human readable string.
    */
   String ToStr(bool delete_trivial_loop = true) const;
+
+  arith::VarContextNode& GetVarContext();
 
   /********** Step APIs working on a single stage **********/
   /*!

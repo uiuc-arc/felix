@@ -28,6 +28,7 @@
 #ifndef TVM_TE_SCHEDULE_PASS_H_
 #define TVM_TE_SCHEDULE_PASS_H_
 
+#include <tvm/arith/var_context.h>
 #include <tvm/te/schedule.h>
 #include <tvm/tir/function.h>
 
@@ -64,7 +65,7 @@ TVM_DLL void AutoInlineInjective(Schedule sch);
  * \param sch The root schedule to infer all the bounds.
  * \return the result bound of the iteration Variable
  */
-Map<IterVar, Range> InferBound(const Schedule& sch);
+Map<IterVar, Range> InferBound(const Schedule& sch, arith::VarContextNode* vcontext = nullptr);
 
 /*!
  * \brief Verify if there is any argument bound to compact buffer.

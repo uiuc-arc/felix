@@ -204,7 +204,7 @@ void InferRootBound(const Stage& stage, const GraphContext& ctx,
   stage->op->GatherBound(stage->op, tmap, rmap);
 }
 
-Map<IterVar, Range> InferBound(const Schedule& sch) {
+Map<IterVar, Range> InferBound(const Schedule& sch, arith::VarContextNode* vcontext) {
   // Prepare context
   GraphContext ctx;
   Array<Operation> roots;
@@ -240,7 +240,7 @@ Map<IterVar, Range> InferBound(const Schedule& sch) {
     }
 
     // pass down to get bound of all iter vars.
-    PassDownDomain(stage, &ret, &analyzer);
+    PassDownDomain(stage, &ret, &analyzer, false, vcontext);
     for (IterVar iv : stage->env_threads) {
       ICHECK(iv->dom.defined());
       ret[iv] = iv->dom;
@@ -253,7 +253,9 @@ Map<IterVar, Range> InferBound(const Schedule& sch) {
   return Map<IterVar, Range>(ret.begin(), ret.end());
 }
 
-TVM_REGISTER_GLOBAL("schedule.InferBound").set_body_typed(InferBound);
+TVM_REGISTER_GLOBAL("schedule.InferBound").set_body_typed([](Schedule sch) {
+  return InferBound(sch);
+});
 
 }  // namespace te
 }  // namespace tvm

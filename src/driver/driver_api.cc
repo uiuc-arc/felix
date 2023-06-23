@@ -299,7 +299,8 @@ IRModule ApplyPasses(IRModule mod, transform::Sequential seq) {
 
 // Convert te schedule to IRModule
 IRModule ScheduleToModule(te::Schedule sch, const Array<ObjectRef>& args, const std::string& name,
-                          const std::unordered_map<te::Tensor, tir::Buffer>& binds) {
+                          const std::unordered_map<te::Tensor, tir::Buffer>& binds,
+                          arith::VarContextNode* vcontext) {
   sch = sch.normalize();
 
   transform::PassContext pass_ctx = transform::PassContext::Current();
@@ -307,7 +308,7 @@ IRModule ScheduleToModule(te::Schedule sch, const Array<ObjectRef>& args, const 
       pass_ctx->GetConfig<Bool>("tir.debug_keep_trivial_loop", Bool(false)).value();
 
   // Before TIR transformation.
-  tir::Stmt stmt = te::ScheduleOps(sch, te::InferBound(sch), debug_keep_trivial_loop);
+  tir::Stmt stmt = te::ScheduleOps(sch, te::InferBound(sch, vcontext), debug_keep_trivial_loop);
   bool compact = te::VerifyCompactBuffer(stmt);
 
   Map<te::Tensor, tir::Buffer> out_binds;

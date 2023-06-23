@@ -201,6 +201,14 @@ State::State(const Array<te::Operation>& ops) {
   data_ = std::move(node);
 }
 
+arith::VarContextNode& State::GetVarContext() {
+  auto* data = CopyOnWrite();
+  if (!data->var_context.defined()) {
+    data->var_context = arith::VarContext::MakeContext();
+  }
+  return *data->var_context.CopyOnWrite();
+}
+
 /********** Schedule primitives apis for state **********/
 Iterator State::bind(int stage_id, const Iterator& it, IteratorAnnotation thread_type) {
   const Stage& stage = operator->()->stages[stage_id];

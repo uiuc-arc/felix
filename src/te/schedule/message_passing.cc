@@ -24,6 +24,7 @@
 #include "message_passing.h"
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/var_context.h>
 #include <tvm/tir/expr.h>
 
 namespace tvm {
@@ -85,22 +86,15 @@ void PassUpThreadBinding(const Stage& stage, std::unordered_map<IterVar, bool>* 
   }
 }
 
+std::pair<PrimExpr, PrimExpr> GetSplitSizes(PrimExpr extent, PrimExpr factor,
+                                            bool no_tighten_factor) {
+  PrimExpr min_factor = no_tighten_factor ? factor : min(extent, factor);
+  PrimExpr divided = indexdiv(extent + (factor - 1), factor);
+  return {min_factor, divided};
+}
+
 void PassDownDomain(const Stage& stage, std::unordered_map<IterVar, Range>* p_state,
-                    arith::Analyzer* actx, bool allow_missing) {
-  auto ceil_div = [actx](const PrimExpr& a, const PrimExpr& b) {
-    if (actx->CanProve(indexmod(a, b) == 0)) {
-      return actx->Simplify(indexdiv(a, b));
-    }
-    return actx->Simplify(indexdiv(a + (b - 1), b));
-  };
-
-  auto minimum_or_later = [actx](const PrimExpr& a, const PrimExpr& b) {
-    if (actx->CanProve(a < b)) {
-      return actx->Simplify(a);
-    }
-    return actx->Simplify(b);
-  };
-
+                    arith::Analyzer* actx, bool allow_missing, arith::VarContextNode* vcontext) {
   std::unordered_map<IterVar, bool> dominating_thread;
   PassUpThreadBinding(stage, &dominating_thread);
 
@@ -125,21 +119,22 @@ void PassDownDomain(const Stage& stage, std::unordered_map<IterVar, Range>* p_st
       // 3. range_parent's extent is not 0.  At lest one Topi test has a case where a tensor has one
       // zero-sized dimension.  Split creates iv with a positive extent to avoid zero-extent
       // IterVar.  We don't touch it.
-      auto resolve_min_extent_for_split = [&](const IterVar& iv, const PrimExpr& factor_or_nparts) {
-        return dominating_thread[iv] || allow_missing || is_zero(range_parent->extent)
-                   ? factor_or_nparts
-                   : minimum_or_later(range_parent->extent, factor_or_nparts);
-      };
       if (r->factor.defined()) {
-        Update(p_state, r->inner,
-               Range::FromMinExtent(0, resolve_min_extent_for_split(r->inner, r->factor)), actx);
-        Update(p_state, r->outer,
-               Range::FromMinExtent(0, ceil_div(range_parent->extent, r->factor)), actx);
+        bool no_tighten =
+            dominating_thread[r->inner] || allow_missing || is_zero(range_parent->extent);
+        auto [inner, outer] =
+            vcontext ? vcontext->GetSplitSizes(range_parent->extent, r->factor, no_tighten)
+                     : GetSplitSizes(range_parent->extent, r->factor, no_tighten);
+        Update(p_state, r->inner, Range::FromMinExtent(0, inner), actx);
+        Update(p_state, r->outer, Range::FromMinExtent(0, outer), actx);
       } else {
-        Update(p_state, r->outer,
-               Range::FromMinExtent(0, resolve_min_extent_for_split(r->outer, r->nparts)), actx);
-        Update(p_state, r->inner,
-               Range::FromMinExtent(0, ceil_div(range_parent->extent, r->nparts)), actx);
+        bool no_tighten =
+            dominating_thread[r->outer] || allow_missing || is_zero(range_parent->extent);
+        auto [outer, inner] =
+            vcontext ? vcontext->GetSplitSizes(range_parent->extent, r->nparts, no_tighten)
+                     : GetSplitSizes(range_parent->extent, r->nparts, no_tighten);
+        Update(p_state, r->outer, Range::FromMinExtent(0, outer), actx);
+        Update(p_state, r->inner, Range::FromMinExtent(0, inner), actx);
       }
     } else if (const FuseNode* r = rel.as<FuseNode>()) {
       if (!state.count(r->outer) || !state.count(r->inner)) {
@@ -148,7 +143,11 @@ void PassDownDomain(const Stage& stage, std::unordered_map<IterVar, Range>* p_st
       }
       const Range& range_outer = state.at(r->outer);
       const Range& range_inner = state.at(r->inner);
-      state[r->fused] = Range::FromMinExtent(0, range_outer->extent * range_inner->extent);
+      PrimExpr extent = range_outer->extent * range_inner->extent;
+      if (vcontext) {
+        extent = vcontext->DefineConstShorthand(extent);
+      }
+      state[r->fused] = Range::FromMinExtent(0, extent);
     } else if (const RebaseNode* r = rel.as<RebaseNode>()) {
       if (!state.count(r->parent)) {
         ICHECK(allow_missing);
