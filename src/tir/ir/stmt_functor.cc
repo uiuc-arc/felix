@@ -19,6 +19,7 @@
 /*!
  * \file stmt_functor.cc
  */
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/module.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/function.h>
@@ -754,6 +755,12 @@ TVM_REGISTER_GLOBAL("tir.Substitute")
       } else {
         return Substitute(Downcast<PrimExpr>(node), vmap);
       }
+    });
+TVM_REGISTER_GLOBAL("tir.SubstByName")
+    .set_body_typed([](PrimExpr expr, Map<String, PrimExpr> vmap) -> PrimExpr {
+      arith::Analyzer analyzer;
+      std::unordered_map<std::string, PrimExpr> vmap2(vmap.begin(), vmap.end());
+      return analyzer.Simplify(SubstByName(expr, vmap2));
     });
 
 }  // namespace tir
