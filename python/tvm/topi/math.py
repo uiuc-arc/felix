@@ -106,7 +106,7 @@ def tanh(x):
     y : tvm.te.Tensor
         The result.
     """
-    return te.compute(x.shape, lambda *i: te.tanh(x(*i)))
+    return te.compute(x.shape, lambda *i: te.tanh(x(*i)), name="T_tanh")
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)

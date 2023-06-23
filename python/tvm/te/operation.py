@@ -15,17 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 """ Operation class for computation declaration."""
+import inspect
+
 # pylint: disable=invalid-name
 from numbers import Integral as _Integral
 from typing import List, Union
-import inspect
 
 import tvm._ffi
+import tvm.tir
+import tvm.tir._ffi_api
 from tvm._ffi.base import string_types
 from tvm.ir import Array
 from tvm.runtime import convert
-import tvm.tir
-import tvm.tir._ffi_api
 
 from . import _ffi_api
 from . import tag as _tag
@@ -94,10 +95,10 @@ def compute(shape, fcompute, name="compute", tag="", attrs=None):
 
     argspec = inspect.getfullargspec(fcompute)
     if len(argspec.args) == 0 and argspec.varargs is None:
-        arg_names = ["i%d" % i for i in range(out_ndim)]
+        arg_names = ["ax%d" % i for i in range(out_ndim)]
     elif argspec.varargs is not None:
         # if there is a varargs, it takes the remaining dimensions of out_ndim
-        arg_names = argspec.args + [f"i{i}" for i in range(out_ndim - len(argspec.args))]
+        arg_names = argspec.args + [f"ax{i}" for i in range(out_ndim - len(argspec.args))]
     else:
         arg_names = argspec.args
         # if there are fewer args than out dimensions, the remaining dimensions

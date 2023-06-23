@@ -1189,12 +1189,6 @@ class Elemwise(RelayComputeOpBuilder):
                 return False
             return is_atom(expr.a) and is_atom(expr.b)
 
-        def relu(x):
-            from tvm.topi.tag import ELEMWISE
-
-            f = lambda *ax: te.max(x(*ax), tir.const(0, x.dtype))  # noqa: E731
-            return te.compute(x.shape, f, name="T_relu", tag=ELEMWISE)
-
         expr = op.body[0]
         if (
             isinstance(expr, tir.Max)
@@ -1205,7 +1199,7 @@ class Elemwise(RelayComputeOpBuilder):
         ):
             return topi.clip, {"a_min": min, "a_max": max}
         if op.name == "T_relu":
-            return relu, {}
+            return topi.nn.relu, {}
         elif simple_binop(expr, tir.Max):
             return topi.maximum, {"rhs": expr.b}
         elif simple_binop(expr, tir.Min):
