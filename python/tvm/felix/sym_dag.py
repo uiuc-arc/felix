@@ -84,12 +84,18 @@ class SymbolicDAG:
         return self, params
 
     def make_ansor_compute_dag(self, config: Optional[dict]) -> Optional[ansor.ComputeDAG]:
+        from tvm import autotvm
+
         nodes = self.sorted_nodes
         graph = self.nx_graph
+        # Turn off AutoTVM config not found warnings
         if config is None:
             config = self._make_sym_config(nodes)
         env: Dict[RelayOpBuilder, te.Tensor] = {}
         dag_inputs = []
+
+        old_autotvm_silent = autotvm.GLOBAL_SCOPE.silent
+        autotvm.GLOBAL_SCOPE.silent = True
         for node in nodes:
             assert isinstance(node, RelayOpBuilder)
             in_edges = graph.in_edges(node, data="input_i")  # type: ignore
@@ -107,6 +113,8 @@ class SymbolicDAG:
             if isinstance(node, Const):
                 dag_inputs.append((node.op_idx, out))
             env[node] = out
+        autotvm.GLOBAL_SCOPE.silent = old_autotvm_silent
+
         graph_ret_nodes = [n for n in graph if graph.out_degree(n) == 0]
         if len(graph_ret_nodes) != 1:
             raise ValueError(f"Graph must have exactly one return node: {graph_ret_nodes}")
@@ -257,24 +265,17 @@ class _TensorEnv:
         if self.constraints:
             # Express shape vars in terms of free vars in self.constraints,
             # and relabel the graph with new nodes.
-            cbs = [cb for cb, _ in self.env.values() if isinstance(cb, Const)]
-            shape_vars = set()
-            for cb in cbs:
-                assert all(isinstance(size, sp.Symbol) for size in cb.dims)
-                shape_vars.update(cb.dims)
+            consts = [cb for cb, _ in self.env.values() if isinstance(cb, Const)]
+            shape_vars = set().union(*[cb.dims for cb in consts])
+            assert all(isinstance(size, sp.Symbol) for size in shape_vars)
             subs = solve(self.constraints, shape_vars)
             relabeling = {
-                cb: Const(cb.op_idx, [size.subs(subs) for size in cb.dims], cb.dtype) for cb in cbs
+                const: Const(const.op_idx, [size.subs(subs) for size in const.dims], const.dtype)
+                for const in consts
             }
             nx.relabel_nodes(graph, relabeling, copy=False)
             # Solve the free vars into concrete values (integers).
-            eqns = []
-            for k, v in self.varmap.items():
-                k = k.subs(subs)
-                if isinstance(k, sp.Integer):
-                    assert k == v
-                else:
-                    eqns.append(sympy.Eq(k, v))
+            eqns = [sympy.Eq(k.subs(subs), v) for k, v in self.varmap.items()]
             varmap = {k: int(v) for k, v in solve(eqns).items()}
         else:
             varmap = self.varmap.copy()
@@ -462,9 +463,9 @@ class Conv(_GeneralConv):
 
     @classmethod
     def try_from_ops(cls, op0: te.ComputeOp, op1: te.ComputeOp):
-        out0, out1 = op0.output(0).name, op1.output(0).name
-        if out0 != "PaddedInput":
+        if (paddings := detect_pad_op(op0)) is None:
             return None
+        out1 = op1.output(0).name
         if out1 == "Conv1dOutput":
             dims = 1
         elif out1 == "Conv2dOutput":
@@ -476,7 +477,6 @@ class Conv(_GeneralConv):
         ret = cls(dims, 1, False)
         strides, groups = parse_conv_stride_group(op1)
         assert groups == 1
-        paddings = parse_pad_op(op0)
         dilations = [1] * dims
         attrs = ret._make_attrs_dict(strides, paddings, dilations)
         return ret, attrs
@@ -494,13 +494,13 @@ class DepthwiseConv2d(_GeneralConv):
 
     @classmethod
     def try_from_ops(cls, op0: te.ComputeOp, op1: te.ComputeOp):
-        out0, out1 = op0.output(0).name, op1.output(0).name
-        if out0 != "PaddedInput" or out1 != "DepthwiseConv2d":
+        if (paddings := detect_pad_op(op0)) is None:
+            return None
+        if op1.output(0).name != "DepthwiseConv2d":
             return None
         ret = cls(2, 1, True)
         strides, groups = parse_conv_stride_group(op1)
         assert groups == 1
-        paddings = parse_pad_op(op0)
         attrs = ret._make_attrs_dict(strides, paddings, dilations=[1, 1])
         return ret, attrs
 
@@ -671,42 +671,39 @@ class TransposeConv2d(RelayComputeOpBuilder):
     ) -> Optional[te.Tensor]:
         strides, paddings, output_pads = self._make_attrs(config)
         paddings = paddings * 2
-        # fmt: off
-        return topi.nn.conv2d_transpose_nchw(
-            input, weight, strides, paddings,
-            out_dtype="float32", output_padding=output_pads,
+        # Using cuda specifically because it's different from the general impl
+        return topi.cuda.conv2d_transpose_nchw(
+            input, weight, strides, paddings, "float32", output_pads
         )  # type: ignore
-        # fmt: on
 
     @classmethod
     def try_from_ops(cls, op0: te.ComputeOp, op1: te.ComputeOp):
-        def parse_floordiv(x):
-            assert isinstance(x, tir.FloorDiv) and isinstance(x.b, tir.IntImm)
-            return x.b.value
-
-        out0, out1 = op0.output(0).name, op1.output(0).name
-        if out0 != "PadInput" or out1 != "conv2d_transpose_nhwc":
+        if (strides := detect_deconv_pad_op(op0)) is None:
             return None
-        ret = cls()
-        paddings = parse_pad_op(op0)
-        pad_input_idxs = op1.body[0].source[0].a.args[1].indices[1:-1]
-        strides = [parse_floordiv(x) for x in pad_input_idxs]
-        if len(paddings) != 4:
-            raise ValueError(f"Invalid padding {paddings}")
-        if len(strides) != 2:
+        if op1.tag != "conv2d_transpose_nchw":
+            return None
+        source = op1.body[0].source[0]
+        if not isinstance(source, tir.Mul):
+            return None
+        if len(strides) != 4:  # Including batch and channel "strides", which should always be 1
             raise ValueError(f"Invalid strides {strides}")
-        if paddings[:2] != paddings[2:]:
-            raise ValueError(f"Unsupported unequal padding {paddings}")
+        strideh, stridew = strides[2:]
+        ishape = op0.input_tensors[0].shape
+        kshape = op1.input_tensors[1].shape
+        oshape = op1.output(0).shape
+        padh = (ishape[2] - 1) * strideh + kshape[2] - oshape[2]
+        padw = (ishape[3] - 1) * stridew + kshape[3] - oshape[3]
+        assert padh % 2 == padw % 2 == 0
+        padh, padw = padh // 2, padw // 2
+        ret = cls()
         (sym_sh, sym_sw), (sym_ph, sym_pw), _ = ret._make_attrs()
-        sh, sw = strides
-        ph, pw = paddings[:2]
-        attrs = {sym_sh: sh, sym_sw: sw, sym_ph: ph, sym_pw: pw}
+        attrs = {sym_sh: strideh, sym_sw: stridew, sym_ph: padh, sym_pw: padw}
         return ret, attrs
 
     def infer_shape(self, input_shapes: List[SymShapeT]):
         input, weight = input_shapes
-        ni, *isizes, ci = input
-        *wsizes, ci_w, co_w = weight
+        ni, ci, *isizes = input
+        ci_w, co_w, *wsizes = weight
         # fmt: off
         cons = [
             (ni, "N"), (ci, "Cin"), (ci_w, "Cin"), (co_w, "Cout"),
@@ -723,7 +720,7 @@ class TransposeConv2d(RelayComputeOpBuilder):
             + 1
             for i in range(2)
         ]
-        output_shape = [ni, *output_shape, co_w]
+        output_shape = [ni, co_w, *output_shape]
         return output_shape, cons
 
     def free_vars(self) -> List[sp.Symbol]:
@@ -953,9 +950,8 @@ class TwoOPsPool(RelayComputeOpBuilder):
 
     @classmethod
     def try_from_ops(cls, op0, op1):
-        if op0.name == "pad_temp" and op1.tag == "pool_max":
+        if (paddings := detect_pad_op(op0)) is not None and op1.tag == "pool_max":
             strides, kernel_sizes = FixedSizePool._parse_pool_attrs(op1)
-            paddings = parse_pad_op(op0)
             if paddings[: len(strides)] != paddings[len(strides) :]:
                 raise ValueError("Unsupported asymmetric padding")
             inst = FixedSizePool(len(strides), is_avg=False, has_paddings=True)
@@ -976,9 +972,12 @@ class ThreeOPsPool(RelayComputeOpBuilder):
 
     @classmethod
     def try_from_ops(cls, op0, op1, op2):
-        if op0.name == "pad_temp" and op1.tag == "pool_sum" and op2.tag == "elemwise":
+        if (
+            (paddings := detect_pad_op(op0)) is not None
+            and op1.tag == "pool_sum"
+            and op2.tag == "elemwise"
+        ):
             strides, kernel_sizes = FixedSizePool._parse_pool_attrs(op1)
-            paddings = parse_pad_op(op0)
             if paddings[: len(strides)] != paddings[len(strides) :]:
                 raise ValueError("Unsupported asymmetric padding")
             inst = FixedSizePool(len(strides), is_avg=True, has_paddings=True)
@@ -987,7 +986,11 @@ class ThreeOPsPool(RelayComputeOpBuilder):
         return None
 
 
-class GlobalAvgPool2D(RelayComputeOpBuilder):
+class AdaptiveAvgPool(RelayComputeOpBuilder):
+    def __init__(self, n_dims: int) -> None:
+        super().__init__()
+        self.n_dims = n_dims
+
     @classmethod
     def lookahead(cls) -> int:
         return 2
@@ -997,30 +1000,37 @@ class GlobalAvgPool2D(RelayComputeOpBuilder):
         if op0.tag != "adaptive_pool_sum" or op1.tag != "elemwise":
             return None
         output_sizes = op0.output(0).shape[1:-1]
-        if len(output_sizes) != 2 or any(x != 1 for x in output_sizes):
+        if len(output_sizes) not in (2, 3):
             return None
-        return cls(), {}
+        self = cls(len(output_sizes))
+        return self, dict(zip(self._make_attrs(), output_sizes))
 
     def make_te(
-        self, _: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
+        self, config: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
     ) -> Optional[te.Tensor]:
-        return topi.nn.global_pool(input, "avg", layout="NHWC")
+        layout = f"N{DIM_NAMES[self.n_dims]}C"
+        osizes = self._make_attrs(config)
+        if self.n_dims == 2:
+            return topi.nn.adaptive_pool(input, osizes, "avg", layout)
+        elif self.n_dims == 3:
+            return topi.nn.adaptive_pool3d(input, osizes, "avg", layout)
+        assert False
 
     def infer_shape(self, input_shapes: List[SymShapeT]):
-        ((n, h, w, c),) = input_shapes
-        cons = [(n, "N"), (h, "H"), (w, "W"), (c, "C")]
-        sym_n, sym_c = self._make_attrs()
-        one = sp.Integer(1)
-        return [sym_n, one, one, sym_c], cons
+        (ishape,) = input_shapes
+        (n, *_, c) = ishape
+        oshape = self.free_vars()
+        idims_name = ["N"] + [f"In{c}" for c in DIM_NAMES[self.n_dims]] + ["C"]
+        return [n, *oshape, c], list(zip(ishape, idims_name))
 
     def free_vars(self) -> List[sp.Symbol]:
         return self._make_attrs()
 
-    def _make_attrs(self, config=None):
-        return [self._mog("N", config), self._mog("C", config)]
+    def _make_attrs(self, configs=None):
+        return [self._mog(f"Out{c}", configs) for c in DIM_NAMES[self.n_dims]]
 
     def __str__(self) -> str:
-        return "GlobalAvgPool2D"
+        return f"AdaptiveAvgPool{self.n_dims}D"
 
     __repr__ = __str__
 
@@ -1204,8 +1214,13 @@ class Elemwise(RelayComputeOpBuilder):
             and (max := get_number(expr.a.b)) is not None
         ):
             return topi.clip, {"a_min": min, "a_max": max}
-        if op.name == "T_relu":
+        elif op.name == "T_relu":
             return topi.nn.relu, {}
+        elif op.name == "T_sigmoid":
+            return topi.sigmoid, {}
+        elif op.name == "T_leaky_relu":
+            alpha = expr.false_value.b.value
+            return topi.nn.leaky_relu, {"alpha": alpha}
         elif simple_binop(expr, tir.Max):
             return topi.maximum, {"rhs": expr.b}
         elif simple_binop(expr, tir.Min):
@@ -1360,7 +1375,10 @@ class Broadcast(RelayComputeOpBuilder):
 RELAY_BUILDERS: List[Type[RelayComputeOpBuilder]] = [
     Conv, DepthwiseConv2d, GroupConv2d, TransposeConv2d, Conv2dTensorCore, Conv2dWinograd,
     Dense, BatchMatMul,
-    GlobalAvgPool2D,
+    # OneOPPool, TwoOPsPool, ThreeOPsPool are just used as parsers
+    # and do not return instances of themselves.
+    # trunk-ignore(mypy/type-abstract)
+    OneOPPool, TwoOPsPool, ThreeOPsPool, AdaptiveAvgPool,
     Softmax, Mean,
     ConstScalar, Elemwise, Broadcast,
 ]
@@ -1390,20 +1408,63 @@ def get_inputs_outputs(
     return inputs, outputs
 
 
-def parse_pad_op(op: te.ComputeOp):
+def _detect_total_padding(op: te.ComputeOp):
+    def is_vsc(x):  # var - const
+        return isinstance(x, tir.Sub) and isinstance(x.a, tir.Var) and isinstance(x.b, tir.IntImm)
+
+    def check_stride(x):
+        if isinstance(x, tir.Var) or is_vsc(x):
+            return 1
+        if isinstance(x, tir.FloorDiv) and is_vsc(x.a) and isinstance(x.b, tir.IntImm):
+            return x.b.value
+        return None
+
+    def total_padding():
+        output_shape = op.output(0).shape
+        input_shape = op.input_tensors[0].shape
+        return [o - i for i, o in zip(input_shape, output_shape)]
+
     body = op.body[0]
+    if isinstance(body, tir.ProducerLoad):
+        if not all(isinstance(x, tir.Var) for x in body.indices):
+            return None
+        padding = total_padding()
+        assert [p == 0 for p in padding]
+        return [1] * len(padding), [0] * len(padding)  # deconv_stride, padding
     if isinstance(body, tir.Call) and body.op.name == "tir.if_then_else":
-        producer_load = body.args[1]
+        strides = [check_stride(index) for index in body.args[1].indices]
+        if any(s is None for s in strides):
+            return None
+        padding = total_padding()
+        return strides, padding
+
+
+def detect_pad_op(op: te.ComputeOp):
+    if (detection := _detect_total_padding(op)) is None:
+        return None
+    strides, padding = detection
+    if any(s != 1 for s in strides):
+        return None
+    # Assume equal padding on both sides
+    if not all(p % 2 == 0 for p in padding):
+        return None
+    padding = [p // 2 for p in padding]
+    if padding[0] == 0 and padding[-1] == 0:
+        # N(*D)C: NWC, NHWC, NCDHW, etc.
+        return padding[1:-1] + padding[1:-1]
+    elif padding[0] == 0 and padding[1] == 0:
+        # NC(*D): NCW, NCHW, NCDHW, etc.
+        return padding[2:] + padding[2:]
     else:
-        assert isinstance(body, tir.ProducerLoad)
-        producer_load = body
-    pad_shifts = [maybe_sub(sub) for sub in producer_load.indices[1:-1]]
-    output_shape = op.output(0).shape[1:-1]
-    input_shape = op.input_tensors[0].shape[1:-1]
-    assert len(pad_shifts) == len(output_shape) == len(input_shape)
-    pad_total = [o - i for i, o in zip(input_shape, output_shape)]
-    pad_rhs = [p - s for p, s in zip(pad_total, pad_shifts)]
-    return pad_shifts + pad_rhs
+        logger.warning(f"Unsupported format detected from padding {padding}")
+        return None
+
+
+def detect_deconv_pad_op(op: te.ComputeOp):
+    if (detection := _detect_total_padding(op)) is None:
+        return None
+    strides, _ = detection
+    return strides
 
 
 def parse_conv_stride_group(op: te.ComputeOp):
@@ -1431,14 +1492,6 @@ def maybe_mul(x) -> int:
         return x.b.value
     elif isinstance(x, tir.Var):
         return 1
-    raise ValueError(f"Unsupported expr {x}")
-
-
-def maybe_sub(x):
-    if isinstance(x, tir.Sub):
-        return x.b
-    elif isinstance(x, tir.Var):
-        return 0
     raise ValueError(f"Unsupported expr {x}")
 
 

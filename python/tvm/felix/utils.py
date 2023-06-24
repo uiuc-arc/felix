@@ -143,13 +143,19 @@ def _check_nhwc_on_torch(model: nn.Module):
 def _convert_to_nhwc(mod):
     from tvm import transform
 
-    # Convert the layout to NHWC
+    # Convert the layout to channel last (NHWC for Conv2d, NDHWC for Conv3d).
     # RemoveUnunsedFunctions is used to clean up the graph.
     converter = relay.transform.ConvertLayout(
         {
             "nn.conv2d": ["NHWC", "default"],
             "nn.max_pool2d": ["NHWC", "default"],
+            "nn.adaptive_avg_pool2d": ["NDHWC", "default"],
+            "nn.conv3d": ["NDHWC", "default"],
+            "nn.max_pool3d": ["NDHWC", "default"],
+            "nn.adaptive_avg_pool3d": ["NDHWC", "default"],
             "qnn.conv2d": ["NHWC", "default"],
+            # NCHW for transpose conv.
+            "nn.conv2d_transpose": ["NCHW", "default"],
         },
     )
     seq = transform.Sequential([relay.transform.RemoveUnusedFunctions(), converter])

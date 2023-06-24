@@ -15,6 +15,7 @@ from .sym_dag import RelayOpBuilder, SymbolicDAG
 _logger = logging.getLogger(__name__)
 __all__ = [
     "SymTask",
+    "SymTaskAndInstances",
     "batch_create_tasks",
     "extract_tasks",
     "extract_tasks_",

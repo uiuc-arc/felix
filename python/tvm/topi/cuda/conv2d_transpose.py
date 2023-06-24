@@ -18,10 +18,10 @@
 """Conv2d transpose template for cuda backend"""
 
 import tvm
-from tvm import te
+from tvm import autotvm, te
+from tvm.autotvm.task.space import OtherOptionEntity, SplitEntity
 from tvm.contrib import cudnn
-from tvm import autotvm
-from tvm.autotvm.task.space import SplitEntity, OtherOptionEntity
+
 from .. import nn
 from ..utils import get_const_tuple, traverse_inline
 
@@ -52,11 +52,16 @@ def conv2d_transpose_nchw(cfg, data, kernel, stride, padding, out_dtype, output_
     Output : tvm.te.Tensor
         4-D with shape [batch, out_channel, out_height, out_width]
     """
+    from tvm.tir import IntImm
+
     batch, inp_channels, inp_height, inp_width = get_const_tuple(data.shape)
     _, out_channels, kernel_height, kernel_width = get_const_tuple(kernel.shape)
     stride_height, stride_width = stride
     outpad_height, outpad_width = output_padding
-    assert outpad_height < stride_height and outpad_width < stride_width
+    if isinstance(outpad_height, IntImm) and isinstance(stride_height, IntImm):
+        assert outpad_height < stride_height
+    if isinstance(outpad_width, IntImm) and isinstance(stride_width, IntImm):
+        assert outpad_width < stride_width
     cfg.stride = stride
     pad_top, pad_left, pad_bottom, pad_right = nn.get_pad_tuple(
         padding, (kernel_height, kernel_width)

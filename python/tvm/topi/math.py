@@ -18,8 +18,8 @@
 # pylint: disable=redefined-builtin
 import tvm
 from tvm import te
-from . import tag
-from . import cpp
+
+from . import cpp, tag
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)
@@ -547,7 +547,7 @@ def sigmoid(x):
     y : tvm.te.Tensor
         The result.
     """
-    return te.compute(x.shape, lambda *i: te.sigmoid(x(*i)))
+    return te.compute(x.shape, lambda *i: te.sigmoid(x(*i)), "T_sigmoid")
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)
