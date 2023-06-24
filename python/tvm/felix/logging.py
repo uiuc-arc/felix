@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Union
 
 PathLike = Union[str, Path]
+_logger = logging.getLogger(__name__)
 
 
 def init_logging(log_dir: PathLike, verbose_logging: bool = False):
@@ -19,7 +20,7 @@ def init_logging(log_dir: PathLike, verbose_logging: bool = False):
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
-            "simple": {"format": "%(levelname)s %(name)s: " "%(message)s"},
+            "simple": {"format": "%(levelname)s %(filename)s:%(lineno)d: %(message)s"},
             "detailed": {
                 "format": "[%(asctime)-15s] "
                 "%(levelname)7s %(name)s: "
@@ -48,6 +49,7 @@ def init_logging(log_dir: PathLike, verbose_logging: bool = False):
     }
     dictConfig(logging_config)
     logging.getLogger("matplotlib").setLevel(logging.INFO)
+    _logger.info("Logging to %s", file_path)
     return logging_config
 
 
