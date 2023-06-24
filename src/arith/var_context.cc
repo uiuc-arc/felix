@@ -84,10 +84,13 @@ std::vector<Var> VarDefStack::FreeVars() {
 }
 
 bool VarDefStack::HasUndefVars(const PrimExpr& expr) {
+  // SizeVar is seen as constant and doesn't count.
   bool has_undef = false;
-  auto CheckUndef = [&has_undef, this](const ObjectRef& node) {
-    const VarNode* op = node.as<VarNode>();
-    if (op && this->var2idx.count(op->name_hint) == 0) {
+  auto CheckUndef = [&has_undef, this](const ObjectRef& obj) {
+    auto* vnode = obj.as<VarNode>();
+    auto* svnode = obj.as<SizeVarNode>();
+    if (vnode && this->var2idx.count(vnode->name_hint) == 0 &&
+        !(svnode && svnode->is_const_symbol)) {
       has_undef = true;
     }
   };
@@ -102,13 +105,13 @@ inline std::pair<PrimExpr, PrimExpr> ConservativeDiv(PrimExpr extent, PrimExpr f
   return std::make_pair(min_factor, divided);
 }
 
-Array<Var> VarContextNode::GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div) {
-  Array<Var> vars;
+Array<SizeVar> VarContextNode::GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div) {
+  Array<SizeVar> vars;
   Array<String> var_names;
   PrimExpr product = 1;
   for (size_t i = 0; i < n_splits; i++) {
     String name = "sp_" + std::to_string(this->split_counter) + "_" + std::to_string(i);
-    Var var(name, DataType::Int(32));
+    SizeVar var(name, DataType::Int(32), Span(), true);
     vars.push_back(var);
     var_names.push_back(name);
     product *= var;

@@ -123,24 +123,30 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     });
 
 // SizeVar
-SizeVar::SizeVar(String name_hint, DataType dtype, Span span) {
+SizeVar::SizeVar(String name_hint, DataType dtype, Span span, bool is_const_symbol) {
   auto n = make_object<SizeVarNode>();
   n->name_hint = std::move(name_hint);
   n->dtype = std::move(dtype);
   n->span = std::move(span);
+  n->is_const_symbol = is_const_symbol;
   data_ = std::move(n);
 }
 
-TVM_REGISTER_GLOBAL("tir.SizeVar").set_body_typed([](String s, DataType t, Span span) {
-  return SizeVar(s, t, span);
-});
+TVM_REGISTER_GLOBAL("tir.SizeVar")
+    .set_body_typed([](String s, DataType t, Span span, bool is_const_symbol) {
+      return SizeVar(s, t, span, is_const_symbol);
+    });
 
 TVM_REGISTER_NODE_TYPE(SizeVarNode);
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     .set_dispatch<SizeVarNode>([](const ObjectRef& node, ReprPrinter* p) {
       auto* op = static_cast<const SizeVarNode*>(node.get());
-      p->stream << "{" << op->name_hint << "|" << op->name_hint << ">=0}";
+      if (op->is_const_symbol) {
+        p->stream << op->name_hint;
+      } else {
+        p->stream << "{" << op->name_hint << "|" << op->name_hint << ">=0}";
+      }
     });
 
 // IterVar

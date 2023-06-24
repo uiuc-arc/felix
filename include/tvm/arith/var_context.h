@@ -73,7 +73,7 @@ class VarContextNode : public Object {
  public:
   void VisitAttrs(tvm::AttrVisitor* v) {}
 
-  Array<tir::Var> GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div);
+  Array<tir::SizeVar> GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div);
   std::pair<PrimExpr, PrimExpr> GetSplitSizes(PrimExpr extent, PrimExpr factor,
                                               bool no_tighten_factor);
 

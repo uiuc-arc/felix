@@ -28,15 +28,16 @@ For example, you can use addexp.a to get the left operand of an Add node.
   assert(y.a == x)
 """
 from typing import Optional, Union
-from tvm import ir
-import tvm._ffi
-from tvm.ir.base import Span
 
-from tvm.runtime import Object, ObjectGeneric, DataType, DataTypeCode, const
-from tvm.ir import PrimExpr, Op
+import tvm._ffi
 import tvm.ir._ffi_api
-from . import generic as _generic
+from tvm import ir
+from tvm.ir import Op, PrimExpr
+from tvm.ir.base import Span
+from tvm.runtime import DataType, DataTypeCode, Object, ObjectGeneric, const
+
 from . import _ffi_api
+from . import generic as _generic
 
 
 def div_ambiguity_error():
@@ -379,8 +380,8 @@ class SizeVar(Var):
     """
 
     # pylint: disable=super-init-not-called
-    def __init__(self, name, dtype, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.SizeVar, name, dtype, span)  # type: ignore
+    def __init__(self, name, dtype, span=None, is_const_symbol: bool = False):
+        self.__init_handle_by_constructor__(_ffi_api.SizeVar, name, dtype, span, is_const_symbol)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.IterVar")

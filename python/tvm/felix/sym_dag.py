@@ -289,7 +289,7 @@ class _TensorEnv:
 class RelayOpBuilder(abc.ABC):
     @abc.abstractmethod
     def make_te(
-        self, config: Dict[str, Union[int, tir.Var]], *inputs: te.Tensor
+        self, config: Dict[str, Union[int, tir.SizeVar]], *inputs: te.Tensor
     ) -> Optional[te.Tensor]:
         pass
 
@@ -315,7 +315,7 @@ class RelayOpBuilder(abc.ABC):
     # Short for make_or_get, used internally.
     @classmethod
     def _mog(
-        cls, name: str, config: Optional[Dict[str, Union[int, tir.Var]]]
+        cls, name: str, config: Optional[Dict[str, Union[int, tir.SizeVar]]]
     ) -> Union[tir.SizeVar, sp.Symbol, int]:
         return sp.Symbol(name) if config is None else config[name]
 
@@ -332,10 +332,10 @@ class Const(RelayOpBuilder):
         shape: List[sp.Expr] = [sp.Symbol(f"n_{op_idx}_{i}") for i in range(len(op.shape))]
         return cls(op_idx, shape, op.dtype)
 
-    def make_te(self, config: Dict[str, Union[int, tir.Var]]) -> Optional[te.Tensor]:
-        if any(isinstance(v, tir.Var) for v in config.values()):
-            assert all(isinstance(v, tir.Var) for v in config.values())
-            converter = SymEngineToTir(cast(Dict[str, tir.Var], config))
+    def make_te(self, config: Dict[str, Union[int, tir.SizeVar]]) -> Optional[te.Tensor]:
+        if any(isinstance(v, tir.SizeVar) for v in config.values()):
+            assert all(isinstance(v, tir.SizeVar) for v in config.values())
+            converter = SymEngineToTir(cast(Dict[str, tir.SizeVar], config))
             shape = [converter(dim) for dim in self.dims]
         else:
             shape = [tir_int(int(dim.subs(config))) for dim in self.dims]
@@ -391,7 +391,7 @@ class _GeneralConv(RelayComputeOpBuilder, abc.ABC):
 
     def make_te(
         self,
-        config: Dict[str, Union[int, tir.Var]],
+        config: Dict[str, Union[int, tir.SizeVar]],
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
@@ -540,7 +540,7 @@ class Conv2dTensorCore(_GeneralConv):
 
     def make_te(
         self,
-        config: Dict[str, Union[int, tir.Var]],
+        config: Dict[str, Union[int, tir.SizeVar]],
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
@@ -587,7 +587,7 @@ class Conv2dWinograd(RelayComputeOpBuilder):
 
     def make_te(
         self,
-        _: Dict[str, Union[int, tir.Var]],
+        _: Dict[str, Union[int, tir.SizeVar]],
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
@@ -665,7 +665,7 @@ class TransposeConv2d(RelayComputeOpBuilder):
 
     def make_te(
         self,
-        config: Dict[str, Union[int, tir.Var]],
+        config: Dict[str, Union[int, tir.SizeVar]],
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
@@ -791,7 +791,7 @@ class BatchMatMul(RelayComputeOpBuilder):
     @classmethod
     def try_from_ops(cls, op0: te.ComputeOp):
         def get_name(idx):
-            return idx.name if isinstance(idx, tir.Var) else None
+            return idx.name if isinstance(idx, tir.SizeVar) else None
 
         if op0.tag != "batch_matmul":
             return None
@@ -828,7 +828,7 @@ class FixedSizePool(RelayComputeOpBuilder, abc.ABC):
         self.has_paddings = has_paddings
 
     def make_te(
-        self, config: Dict[str, Union[int, tir.Var]], input: te.Tensor
+        self, config: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
     ) -> Optional[te.Tensor]:
         op = self.OPS[self.n_dims]  # type: ignore
         layout = "".join(DIM_NAMES[self.n_dims])
@@ -906,7 +906,7 @@ class FixedSizePool(RelayComputeOpBuilder, abc.ABC):
             lhs, rhs = index.a, index.b
             if isinstance(lhs, tir.Mul) and isinstance(lhs.b, tir.IntImm):
                 stride, reduce_var = lhs.b, rhs
-            elif isinstance(lhs, tir.Var):
+            elif isinstance(lhs, tir.SizeVar):
                 stride, reduce_var = tir_int(1), rhs
             else:
                 raise ValueError(f"Unsupported pooling index {index}")
@@ -1001,7 +1001,9 @@ class GlobalAvgPool2D(RelayComputeOpBuilder):
             return None
         return cls(), {}
 
-    def make_te(self, _: Dict[str, Union[int, tir.Var]], input: te.Tensor) -> Optional[te.Tensor]:
+    def make_te(
+        self, _: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
+    ) -> Optional[te.Tensor]:
         return topi.nn.global_pool(input, "avg", layout="NHWC")
 
     def infer_shape(self, input_shapes: List[SymShapeT]):
@@ -1036,7 +1038,9 @@ class Softmax(RelayComputeOpBuilder):
     def free_vars(self) -> List[sp.Symbol]:
         return []
 
-    def make_te(self, _: Dict[str, Union[int, tir.Var]], input: te.Tensor) -> Optional[te.Tensor]:
+    def make_te(
+        self, _: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
+    ) -> Optional[te.Tensor]:
         return topi.nn.softmax(input, self.axis)  # type: ignore
 
     @classmethod
@@ -1078,7 +1082,7 @@ class ConstScalar(RelayComputeOpBuilder):
     def free_vars(self) -> List[sp.Symbol]:
         return []
 
-    def make_te(self, config: Dict[str, Union[int, tir.Var]]) -> Optional[te.Tensor]:
+    def make_te(self, config: Dict[str, Union[int, tir.SizeVar]]) -> Optional[te.Tensor]:
         return te.compute([], lambda: self.value, "compile_engine_const", "broadcast")  # type: ignore
 
     @classmethod
@@ -1103,7 +1107,9 @@ class Mean(RelayComputeOpBuilder):
         super().__init__()
         self.n_dims = n_dims
 
-    def make_te(self, _: Dict[str, Union[int, tir.Var]], input: te.Tensor) -> Optional[te.Tensor]:
+    def make_te(
+        self, _: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
+    ) -> Optional[te.Tensor]:
         sum_ = topi.sum(input, axis=self.n_dims - 1, keepdims=True)
         return topi.divide(sum_, input.shape[-1])
 
@@ -1454,7 +1460,7 @@ def tvm_data_to_python(data) -> Any:
 
 
 def tir_config_var(name: str):
-    return tir.Var(name, "int32")
+    return tir.SizeVar(name, "int32", None, True)
 
 
 def tir_int(v: int):
@@ -1470,7 +1476,7 @@ def _visit_sym_binary(ctor):
 
 
 class SymEngineToTir:
-    def __init__(self, name_to_vars: Dict[str, tir.Var]) -> None:
+    def __init__(self, name_to_vars: Dict[str, tir.SizeVar]) -> None:
         super().__init__()
         self.name_to_vars = name_to_vars
 

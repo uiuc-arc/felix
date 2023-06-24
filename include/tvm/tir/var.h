@@ -136,6 +136,13 @@ class Var : public PrimExpr {
  */
 class SizeVarNode : public VarNode {
  public:
+  bool is_const_symbol;
+
+  void VisitAttrs(AttrVisitor* v) {
+    v->Visit("is_const_symbol", &is_const_symbol);
+    VarNode::VisitAttrs(v);
+  }
+
   static constexpr const char* _type_key = "tir.SizeVar";
   TVM_DECLARE_FINAL_OBJECT_INFO(SizeVarNode, VarNode);
 };
@@ -151,7 +158,8 @@ class SizeVar : public Var {
    * \param span The location of this object in the source code.
    */
   TVM_DLL explicit SizeVar(String name_hint = "s", DataType t = DataType::Int(32),
-                           Span span = Span());
+                           Span span = Span(), bool is_const_symbol = false);
+
   /*!
    * \brief Get pointer to the internal value.
    * \return the corresponding Variable.
