@@ -22,9 +22,9 @@ from tvm.contrib import nvcc
 from tvm.contrib.thrust import can_use_thrust
 from tvm.te import SpecializedCondition
 
-from .. import op as _op
 from ....target import Target
 from ....tir import IntImm
+from .. import op as _op
 from .generic import *
 
 
@@ -247,13 +247,13 @@ def conv2d_strategy_cuda(attrs, inputs, out_type, target):
                 )
 
             # register auto-scheduler implementations
-            if is_auto_scheduler_enabled() and judge_winograd_auto_scheduler:
-                strategy.add_implementation(
-                    wrap_compute_conv2d(topi.nn.conv2d_winograd_nhwc),
-                    naive_schedule,  # this implementation should never be picked by autotvm
-                    name="conv2d_nhwc.winograd",
-                    plevel=15,
-                )
+            # if is_auto_scheduler_enabled() and judge_winograd_auto_scheduler:
+            #     strategy.add_implementation(
+            #         wrap_compute_conv2d(topi.nn.conv2d_winograd_nhwc),
+            #         naive_schedule,  # this implementation should never be picked by autotvm
+            #         name="conv2d_nhwc.winograd",
+            #         plevel=15,
+            #     )
 
         elif layout == "HWNC":
             assert kernel_layout in ["HWOI", "HWOI16o16i", "HWOI8o32i", "HWOI32o16i"]
@@ -526,13 +526,13 @@ def conv2d_winograd_without_weight_transfrom_strategy_cuda(attrs, inputs, out_ty
                 name="conv2d_nhwc_winograd_direct_without_weight_transform.cuda",
             )
 
-        if is_auto_scheduler_enabled():
-            strategy.add_implementation(
-                wrap_compute_conv2d(topi.nn.conv2d_winograd_nhwc_without_weight_transform),
-                naive_schedule,  # this implementation should never be picked by autotvm
-                name="conv2d_nhwc_winograd_without_weight_transform",
-                plevel=15,
-            )
+        # if is_auto_scheduler_enabled():
+        #     strategy.add_implementation(
+        #         wrap_compute_conv2d(topi.nn.conv2d_winograd_nhwc_without_weight_transform),
+        #         naive_schedule,  # this implementation should never be picked by autotvm
+        #         name="conv2d_nhwc_winograd_without_weight_transform",
+        #         plevel=15,
+        #     )
     else:
         raise RuntimeError(
             "Unsupported conv2d_winograd_without_weight_transfrom layout {}".format(layout)
