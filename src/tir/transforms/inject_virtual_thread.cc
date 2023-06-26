@@ -174,7 +174,7 @@ class VarTouchedAnalysis : public StmtVisitor {
 class VTInjector : public StmtExprMutator {
  public:
   // constructor
-  VTInjector(Var var, int num_threads, const std::unordered_set<const VarNode*>& touched_var,
+  VTInjector(Var var, PrimExpr num_threads, const std::unordered_set<const VarNode*>& touched_var,
              bool allow_share)
       : var_(var),
         num_threads_(num_threads),
@@ -379,7 +379,7 @@ class VTInjector : public StmtExprMutator {
                               make_const(DataType::Int(32), 1), op->extents) *
                         op->dtype.lanes();
       Array<PrimExpr> other;
-      other.push_back(make_const(op->extents[0].dtype(), num_threads_));
+      other.push_back(num_threads_);
       for (PrimExpr e : extents) {
         other.push_back(e);
       }
@@ -414,10 +414,15 @@ class VTInjector : public StmtExprMutator {
     vt_loop_injected_ = false;
     visit_touched_var_ = false;
     // only unroll if number of vthreads are small
-    if (max_loop_depth_ == 0 && num_threads_ < 16) {
+    auto* nthreads_const = num_threads_.as<IntImmNode>();
+    if (!nthreads_const) {
+      LOG_WARNING << "Comparing number of vthreads " << num_threads_ << " with " << 16
+                  << " to decide whether to unroll the loop";
+    }
+    if (max_loop_depth_ == 0 && nthreads_const && nthreads_const->value < 16) {
       // do unrolling if it is inside innermost content.
       Array<Stmt> seq;
-      for (int i = 0; i < num_threads_; ++i) {
+      for (int i = 0; i < nthreads_const->value; ++i) {
         seq.push_back(Substitute(stmt, {{var_, make_const(var_.dtype(), i)}}));
       }
       return SeqStmt::Flatten(seq);
@@ -426,8 +431,7 @@ class VTInjector : public StmtExprMutator {
       Var idx(var_->name_hint + ".s", var_->dtype);
       Map<Var, PrimExpr> values{{var_, idx}};
       stmt = Substitute(stmt, values);
-      return For(idx, make_zero(idx.dtype()), make_const(idx.dtype(), num_threads_),
-                 ForKind::kSerial, stmt);
+      return For(idx, make_zero(idx.dtype()), num_threads_, ForKind::kSerial, stmt);
     }
   }
 
@@ -435,7 +439,7 @@ class VTInjector : public StmtExprMutator {
   // vthread variable
   Var var_;
   // the threads/lanes
-  int num_threads_;
+  PrimExpr num_threads_;
   // whethe the loop is already injected.
   bool vt_loop_injected_{false};
   // whether current expression get touched.
@@ -460,10 +464,9 @@ class VirtualThreadInjector : public StmtMutator {
     if (op->attr_key == attr::virtual_thread) {
       IterVar iv = Downcast<IterVar>(op->node);
       bool allow_share = std::string(iv->thread_tag).substr(0, 7) == "vthread";
-      int nthread = static_cast<int>(op->value.as<IntImmNode>()->value);
       VarTouchedAnalysis vs;
       auto touched = vs.TouchedVar(op->body, iv->var.get());
-      VTInjector injector(iv->var, nthread, touched, allow_share);
+      VTInjector injector(iv->var, op->value, touched, allow_share);
       return injector(op->body);
     } else {
       return stmt;

@@ -548,13 +548,16 @@ class LoopVectorizer : public StmtMutator {
     if (op->kind == ForKind::kVectorized) {
       ICHECK(is_zero(op->min));
       auto* extent_as_int = op->extent.as<IntImmNode>();
-      if (!extent_as_int || extent_as_int->value < 1) {
-        LOG(FATAL) << "Failed to vectorize loop with extent " << op->extent;
+      if (extent_as_int && extent_as_int->value >= 1) {
+        return Vectorizer(op->loop_var, static_cast<int>(extent_as_int->value))(op->body);
       }
-      return Vectorizer(op->loop_var, static_cast<int>(extent_as_int->value))(op->body);
-    } else {
-      return StmtMutator::VisitStmt_(op);
+      // If bound is symbolic, return a serial loop.
+      // Even if Vectorizer is called, it will most likely not vectorize the loop (see
+      // `need_scalarize_`). Also, this loop would always be again annotated as vectorized (in the
+      // downstream passes, for some reasons).
+      return For(op->loop_var, op->min, op->extent, ForKind::kSerial, op->body);
     }
+    return StmtMutator::VisitStmt_(op);
   }
 };
 

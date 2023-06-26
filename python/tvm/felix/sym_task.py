@@ -10,6 +10,7 @@ from tvm import auto_scheduler as ansor
 from tvm.auto_scheduler.workload_registry import register_workload_tensors
 
 from . import ffi, utils
+from .sketch import Sketch
 from .sym_dag import RelayOpBuilder, SymbolicDAG
 
 _logger = logging.getLogger(__name__)
@@ -39,11 +40,11 @@ class SymTask:
         self.ansor_dag = sym_ansor_dag
         self.const_names = const_names
         self.ansor_task, self.ansor_policy = self.make_task_from_dag(sym_ansor_dag)
-        self.sketches = ffi.generate_all_sym_sketches(self.ansor_policy)
-        # self.sketches = [Sketch(self, sketch) for sketches_ in sketches for sketch in sketches_]
-        # self._backbone_to_sketch = defaultdict(list)
-        # for sketch in self.sketches:
-        #     self._backbone_to_sketch[sketch.backbone].append(sketch)
+        sketches = ffi.generate_all_sym_sketches(self.ansor_policy)
+        self.sketches = [Sketch(self, sketch) for sketch in sketches]
+        self._backbone_to_sketch = defaultdict(list)
+        for sketch in self.sketches:
+            self._backbone_to_sketch[sketch.backbone].append(sketch)
 
     @property
     def flops_expr(self):
@@ -52,15 +53,15 @@ class SymTask:
     def get_flops(self, sizes):
         return int(ffi.subst_by_name(self.flops_expr, sizes))
 
-    # def find_sketch(self, backbone: tuple) -> Optional[Sketch]:
-    #     sketches = self._backbone_to_sketch.get(backbone)
-    #     if sketches is None:
-    #         _logger.warning(f"Backbone {backbone} not found")
-    #         return None
-    #     if len(sketches) > 1:
-    #         _logger.warning(f"Backbone {backbone} has multiple sketches")
-    #         return None
-    #     return sketches[0]
+    def find_sketch(self, backbone: tuple) -> Optional[Sketch]:
+        sketches = self._backbone_to_sketch.get(backbone)
+        if sketches is None:
+            _logger.warning(f"Backbone {backbone} not found")
+            return None
+        if len(sketches) > 1:
+            _logger.warning(f"Backbone {backbone} has multiple sketches")
+            return None
+        return sketches[0]
 
     def make_concrete_task(self, size_info: Dict[str, int]):
         ansor_dag = self.sym_dag.make_ansor_compute_dag(size_info)
@@ -133,10 +134,10 @@ def batch_create_tasks(
         if print_tasks:
             log_print.append(f"Task {task}: ")
             log_print.append(f"  Workload key: {task.ansor_task.workload_key}")
-            # sketches = [
-            #     f"\n    Sketch #{len(sk.backbone)} -> {sk.save_path()}" for sk in task.sketches
-            # ]
-            # log_print.append(f"  Sketches:{''.join(sketches)}")
+            sketches = [
+                f"\n    Sketch #{len(sk.backbone)} -> {sk.save_path()}" for sk in task.sketches
+            ]
+            log_print.append(f"  Sketches:{''.join(sketches)}")
             log_print.append(f"  Size params: {size_params}")
             for index, weight, size_dict in instances:
                 flops = task.get_flops(size_dict)

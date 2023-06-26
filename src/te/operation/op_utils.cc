@@ -136,7 +136,7 @@ std::vector<std::vector<Stmt> > MakeLoopNest(const Stage& stage,
       // virtual thread
       // Always restrict threaded IterVar to starts from 0.
       ICHECK(is_zero(dom->min));
-      ICHECK(is_positive_const(dom->extent));
+      // ICHECK(is_positive_const(dom->extent));
       // annotate the extent of the IterVar
       nest[i + 1].emplace_back(AttrStmt(bind_iv, tir::attr::virtual_thread, dom->extent, no_op));
       value_map[iv] = var;
