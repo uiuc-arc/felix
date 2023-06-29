@@ -173,10 +173,6 @@ class RandConfigMaker:
         current = torch.zeros((1, self.coefs.shape[1]), device=self.device)
         while len(current) < n_configs + 1:
             next = self.rand_next_points(current)
-            # Restore configs into the original scale (multiplying with `bounds`; see above)
-            # Still needs to check as we have non-linear constraints too.
-            valid_mask = torch.all(self.constraints_f(next * self.bounds) <= 0, dim=1)
-            next = next[valid_mask]
             # Don't insert scale-restored points into `configs` yet.
             # We need to work with [0, 1]^n points here.
             current = torch.cat([current, next], dim=0)

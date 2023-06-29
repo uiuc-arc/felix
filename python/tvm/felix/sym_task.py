@@ -4,13 +4,15 @@ from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
 import onnx
-from torch import nn
+import torch
+from torch import Tensor, nn
 from tqdm import tqdm
 from tvm import auto_scheduler as ansor
+from tvm.auto_scheduler.cost_model import MLPCostModel
 from tvm.auto_scheduler.workload_registry import register_workload_tensors
 
 from . import ffi, utils
-from .sketch import Sketch
+from .sketch import Sketch, SketchPerfFunc
 from .sym_dag import RelayOpBuilder, SymbolicDAG
 
 _logger = logging.getLogger(__name__)
@@ -215,3 +217,62 @@ def load_and_register_tasks(task_pkl: utils.PathLike):
 def load_and_register_tasks_(task_pkl: utils.PathLike):
     tasks = load_and_register_tasks(task_pkl)
     return [(sym_task, instance) for sym_task, instances in tasks for instance in instances]
+
+
+class TaskLatFunc(nn.Module):
+    def __init__(
+        self,
+        task: SymTask,
+        sizes: Dict[str, int],
+        weight: int,
+        sketches: List[SketchPerfFunc],
+        model_ret_throughput: bool,
+    ) -> None:
+        super().__init__()
+        self.task = task
+        self.sizes = sizes
+        self.weight = weight
+        self._sketches = nn.ModuleList(sketches)
+        self.is_throughput = model_ret_throughput
+        self.flops = task.get_flops(sizes)
+
+    @classmethod
+    def from_task_sketches(
+        cls, task: SymTask, sizes: Dict[str, int], weight: int, perf_model: MLPCostModel
+    ):
+        sketches = [
+            lat_f
+            for sketch in task.sketches
+            if (lat_f := SketchPerfFunc.from_sketch(sketch, sizes, perf_model)) is not None
+        ]
+        if not sketches:
+            return None
+        return cls(task, sizes, weight, sketches, perf_model.is_throughput)
+
+    @property
+    def sketches(self):
+        return cast(List[SketchPerfFunc], list(self._sketches))
+
+    def forward(self, configs: List[Tensor]):
+        if len(configs) != len(self._sketches):
+            raise ValueError(
+                f"Number of configs {len(configs)} does not match number of sketches "
+                f"{len(self._sketches)} for task {self.task}"
+            )
+        perfs, constraints = utils.transpose2(
+            [sketch.forward(config) for sketch, config in zip(self.sketches, configs)]
+        )
+        # perfs: [n_sketches] x [n_configs]
+        # constraints: [n_sketches] x [n_configs, n_constraints]
+        return torch.stack(perfs, dim=0), constraints
+
+    def rand_configs(self, n: int) -> List[Tensor]:
+        return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
+
+    def __repr__(self) -> str:
+        return (
+            f"TaskLatFunc({self.task}, sizes={self.sizes}, weight={self.weight}, "
+            f"sketches={len(self._sketches)})"
+        )
+
+    __str__ = __repr__

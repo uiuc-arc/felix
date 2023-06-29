@@ -1,7 +1,9 @@
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
+from torch import Tensor, nn
+from tvm.auto_scheduler.cost_model import MLPCostModel
 from tvm.auto_scheduler.loop_state import StateObject
 from tvm.tir import Stmt
 
@@ -69,3 +71,21 @@ class Sketch:
         return f"Sketch({self.backbone} from {self.parent_task})"
 
     __repr__ = __str__
+
+
+class SketchPerfFunc(nn.Module):
+    def __init__(self, sketch: Sketch, features: TorchFeatures, cost_f: MLPCostModel) -> None:
+        super().__init__()
+        self.sketch = sketch
+        self.features = features
+        self.cost_f = cost_f
+
+    @classmethod
+    def from_sketch(cls, sketch: Sketch, sizes: dict, cost_f: MLPCostModel) -> "SketchPerfFunc":
+        features = sketch.fetch_features(sizes)
+        return cls(sketch, features, cost_f)
+
+    def forward(self, configs: Tensor) -> Tuple[Tensor, Tensor]:
+        feats, constraints = self.features(configs)
+        perf = self.cost_f.forward(feats)
+        return perf, constraints

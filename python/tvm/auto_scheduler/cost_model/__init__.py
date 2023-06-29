@@ -18,4 +18,7 @@
 """ Cost model that estimates the performance of programs """
 
 from .cost_model import RandomModel
+from .dataset import Dataset, make_dataset_from_log_file
+from .metric import *
+from .mlp_model import *
 from .xgb_model import XGBModel
