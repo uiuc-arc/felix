@@ -321,6 +321,7 @@ pub static STABLE_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
         rewrite!("div-intro";   "(* ?a (pow ?b -1))"    => "(/ ?a ?b)"),
         rewrite!("div-cancel";  "(* ?a (pow ?a -1))"    => "1"),
         rewrite!("add-mul-distrib";     "(* ?a (+ ?b ?c))"              => "(+ (* ?a ?b) (* ?a ?c))"),
+        rewrite!("add-mul-factor";      "(+ (* ?a ?b) (* ?a ?c))"       => "(* ?a (+ ?b ?c))"),
         rewrite!("pow-mul-factor";      "(* (pow ?a ?b) (pow ?a ?c))"   => "(pow ?a (+ ?b ?c))"),
         rewrite!("pow-1";       "(pow ?a 1)"            => "?a"),
         rewrite!("pow-pow";     "(pow (pow ?a ?b) ?c)"  => "(pow ?a (* ?b ?c))"),

@@ -17,11 +17,23 @@ class VarContext(tvm.Object):
         return dict(_arith.VarContextGetVarDefs(self))
 
 
-# TIR Expr Utils
+# PrimExpr Utils
 
 
 def subst_by_name(expr: tir.PrimExpr, kvs: Dict[str, tir.PrimExpr]) -> tir.PrimExpr:
     return _tir.SubstByName(expr, kvs)
+
+
+def is_expr_equivalent(e1: tir.PrimExpr, e2: tir.PrimExpr) -> bool:
+    return _arith.IsExprEquivalent(e1, e2, 30, 10000)
+
+
+def print_expr_preorder(expr: tir.PrimExpr) -> str:
+    return _arith.PrintExprPreorder(expr)
+
+
+def parse_expr_preorder(expr: str) -> tir.PrimExpr:
+    return _arith.ParseExprPreorder(expr)
 
 
 # Felix main functionality entry points
@@ -43,3 +55,7 @@ def generate_code_for_state(
 
 def print_state_tr_steps(state: StateObject) -> str:
     return "\n".join(_ansor.PrintTrStep(s) for s in state.transform_steps)
+
+
+def get_loop_bounds(code: tir.Stmt) -> List[Tuple[str, tir.PrimExpr]]:
+    return list(_ansor.GetLoopBounds(code))

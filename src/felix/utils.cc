@@ -11,6 +11,7 @@ namespace felix {
 
 using namespace tvm::auto_scheduler;
 using namespace tvm::tir::transform;
+using namespace tvm::arith;
 
 Sequential GetGPUCodeGenPasses(const HardwareParams& hw_params, bool verify) {
   auto pass_list = Array<Pass>();
@@ -37,7 +38,7 @@ Sequential GetGPUCodeGenPasses(const HardwareParams& hw_params, bool verify) {
 }
 
 Stmt GenerateCodeForState(const SearchTask& task, const State& state, bool is_symbolic,
-                          bool print_error, arith::VarContextNode* var_context) {
+                          bool print_error, VarContextNode* var_context) {
   te::Schedule sch;
   Array<te::Tensor> tensors;
   std::tie(sch, tensors) = task->compute_dag.ApplySteps(state->transform_steps);
@@ -150,16 +151,54 @@ TVM_REGISTER_GLOBAL("auto_scheduler.ExtractBackbone").set_body_typed([](const Ar
   return ret;
 });
 
+class ForLoopCollector : public StmtExprVisitor {
+ public:
+  void VisitStmt_(const BufferRealizeNode* node) final {
+    this->bufreal_nodes.push_back(node);
+    StmtExprVisitor::VisitStmt_(node);
+    this->bufreal_nodes.pop_back();
+  }
+
+  void VisitStmt_(const ForNode* node) final {
+    ICHECK(!this->bufreal_nodes.empty());
+    auto* last_buf_node = this->bufreal_nodes.back();
+    String name = last_buf_node->buffer->name + "/" + node->loop_var->name_hint;
+    this->for_loops.emplace_back(name, SimplifyExpr(node->extent));
+    StmtExprVisitor::VisitStmt_(node);
+  }
+
+  void VisitStmt_(const AttrStmtNode* node) final {
+    if (node->attr_key == tir::attr::thread_extent || node->attr_key == tir::attr::virtual_thread) {
+      const Var& var = node->node.as<IterVarNode>()->var;
+      this->for_loops.emplace_back(var->name_hint, SimplifyExpr(node->value));
+    }
+    StmtExprVisitor::VisitStmt_(node);
+  }
+
+  std::vector<std::pair<String, PrimExpr>> for_loops;
+  std::vector<const BufferRealizeNode*> bufreal_nodes;
+};
+
 TVM_REGISTER_GLOBAL("auto_scheduler.PrintTrStep").set_body_typed(PrintTrStep);
 
 TVM_REGISTER_GLOBAL("auto_scheduler.GenerateCodeForState")
     .set_body_typed([](const SearchTask& task, State state, Bool symbolic) {
       bool is_sym = symbolic->value;
-      arith::VarContextNode* var_context = is_sym ? &state.GetVarContext() : nullptr;
+      VarContextNode* var_context = is_sym ? &state.GetVarContext() : nullptr;
       auto code = GenerateCodeForState(
           task, state, is_sym, /* print error for symbolic generation */ is_sym, var_context);
-      return Array<ObjectRef>{code, GetRef<arith::VarContext>(var_context)};
+      return Array<ObjectRef>{code, GetRef<VarContext>(var_context)};
     });
+
+TVM_REGISTER_GLOBAL("auto_scheduler.GetLoopBounds").set_body_typed([](Stmt stmt) {
+  ForLoopCollector collector;
+  collector(stmt);
+  Array<Array<ObjectRef>> ret;
+  for (auto& kv : collector.for_loops) {
+    ret.push_back({kv.first, kv.second});
+  }
+  return ret;
+});
 
 }  // namespace felix
 }  // namespace tvm

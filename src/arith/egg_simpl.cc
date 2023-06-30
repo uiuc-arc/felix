@@ -18,10 +18,10 @@ namespace arith {
 class PreorderPrinter : public ExprFunctor<void(const PrimExpr&)> {
  public:
   std::string Print(const PrimExpr& expr) {
-    ss.clear();
+    ss.clear(), ss.str("");
     VisitExpr(expr);
     auto ret = ss.str();
-    ss.clear();
+    ss.clear(), ss.str("");
     return ret;
   }
 
@@ -307,6 +307,12 @@ PrimExpr ParseExprPrefix(const String& str) {
 }
 
 TVM_REGISTER_GLOBAL("arith.SimplifyExprStr").set_body_typed(SimplifyExprStr);
+TVM_REGISTER_GLOBAL("arith.IsExprEquivalent")
+    .set_body_typed([](PrimExpr e1, PrimExpr e2, size_t n_iters, size_t n_nodes) {
+      PreorderPrinter printer;
+      auto se1 = printer.Print(e1), se2 = printer.Print(e2);
+      return is_equivalent(se1.c_str(), se2.c_str(), false, n_iters, n_nodes, false);
+    });
 TVM_REGISTER_GLOBAL("arith.IsExprStrEquivalent")
     .set_body_typed([](String se1, String se2, size_t n_iters, size_t n_nodes, bool diff_approx) {
       return is_equivalent(se1.c_str(), se2.c_str(), true, n_iters, n_nodes, diff_approx);
