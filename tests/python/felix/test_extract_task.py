@@ -17,7 +17,7 @@ def check_tasks(tasks: List[felix.SymTaskAndInstances], expected: Dict[str, List
         desc = str(task)
         assert desc in expected
         expected_indices = expected[desc]
-        actual_indices = [idx for (idx, _, _) in instances]
+        actual_indices = [inst.idx for inst in instances]
         assert expected_indices == actual_indices
         sketch_lens = TASK_SKETCH_LENS.get(desc)
         print(desc, sketch_lens)

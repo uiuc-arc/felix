@@ -13,8 +13,8 @@ from tvm.tir import _ffi_api as _tir
 
 @tvm._ffi.register_object("arith.VarContext")
 class VarContext(tvm.Object):
-    def to_str(self) -> str:
-        return _arith.VarMapToStr(self)
+    def to_varmap(self) -> Dict[tir.Var, tir.PrimExpr]:
+        return dict(_arith.VarContextGetVarDefs(self))
 
 
 # TIR Expr Utils

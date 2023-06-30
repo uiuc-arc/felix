@@ -13,7 +13,25 @@ namespace arith {
 
 using namespace tir;
 
+TVM_REGISTER_NODE_TYPE(VarExprPairNode);
+TVM_REGISTER_NODE_TYPE(VarDefStackNode);
+TVM_REGISTER_NODE_TYPE(SplitGroupNode);
 TVM_REGISTER_NODE_TYPE(VarContextNode);
+
+TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
+    .set_dispatch<VarDefStackNode>([](const ObjectRef& node, ReprPrinter* p) {
+      auto* op = static_cast<const VarDefStackNode*>(node.get());
+      auto vname_expr = op->GetExprs();
+      p->stream << "{";
+      for (size_t i = 0; i < vname_expr.size(); i++) {
+        auto& pair = vname_expr[i];
+        if (i != 0) {
+          p->stream << ",\n";
+        }
+        p->stream << pair->var << ": " << pair->expr;
+      }
+      p->stream << "}";
+    });
 
 inline bool HasDiv(const PrimExpr& expr) {
   bool found = false;
@@ -25,65 +43,66 @@ inline bool HasDiv(const PrimExpr& expr) {
   return found;
 }
 
-Var VarDefStack::Append(const std::string& vname, const PrimExpr& expr) {
+Var VarDefStackNode::Append(const std::string& vname, const PrimExpr& expr) {
   auto it = this->var2idx.find(vname);
   if (it == this->var2idx.end()) {
-    this->var2idx.emplace(vname, this->exprs.size());
+    this->var2idx.Set(vname, this->exprs.size());
     this->expr2idx.emplace(expr, this->exprs.size());
     tir::Var var(vname, expr->dtype);
-    this->exprs.emplace_back(var, expr);
+    this->exprs.push_back(VarExprPair(var, expr));
     return var;
   } else {
-    auto& [v, e] = this->exprs[it->second];
-    e = expr;
-    return v;
+    size_t idx = (*it).second;
+    auto& pair = this->exprs[idx];
+    this->exprs.Set(idx, VarExprPair(pair->var, expr));
+    return pair->var;
   }
 }
 
-Var VarDefStack::FindOrAppend(const std::string& vname, const PrimExpr& expr) {
+Var VarDefStackNode::FindOrAppend(const std::string& vname, const PrimExpr& expr) {
   auto it = this->expr2idx.find(expr);
   if (it != this->expr2idx.end()) {
-    return this->exprs[it->second].first;
+    return this->exprs[it->second]->var;
   }
   return this->Append(vname, expr);
 }
 
-VarDefStack VarDefStack::Prepend(const VarMapT& vmap) const {
-  VarDefStack ret;
+VarDefStackNode VarDefStackNode::Prepend(const VarMapT& vmap) const {
+  VarDefStackNode ret;
   for (auto& [vname, expr] : vmap) {
     ret.Append(vname, expr);
   }
-  for (auto& [var, expr] : this->exprs) {
-    ret.Append(var->name_hint, expr);
+  for (auto& pair : this->exprs) {
+    ret.Append(pair->var->name_hint, pair->expr);
   }
   return ret;
 }
 
-VarMapT VarDefStack::IntoVarMap() const {
+VarMapT VarDefStackNode::IntoVarMap() const {
   VarMapT vmap;
-  for (const auto& [vname, expr] : this->exprs) {
-    vmap.emplace(vname->name_hint, tir::SubstByName(expr, vmap));
+  for (const auto& pair : this->exprs) {
+    vmap.emplace(pair->var->name_hint, tir::SubstByName(pair->expr, vmap));
   }
   return vmap;
 }
 
-std::vector<Var> VarDefStack::FreeVars() {
+std::vector<Var> VarDefStackNode::FreeVars() const {
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> vars;
   auto CollectVars = [&vars](const ObjectRef& node) {
     if (const VarNode* op = node.as<VarNode>()) {
       vars.insert(GetRef<Var>(op));
     }
   };
-  for (const auto& [_, expr] : this->GetExprs()) {
-    tir::PostOrderVisit(expr, CollectVars);
+  for (const auto& pair : this->GetExprs()) {
+    tir::PostOrderVisit(pair->expr, CollectVars);
   }
-  for (const auto& [var, _] : this->GetExprs()) {
-    vars.erase(var);
+  for (const auto& pair : this->GetExprs()) {
+    vars.erase(pair->var);
   }
   return std::vector<Var>(vars.begin(), vars.end());
 }
 
-bool VarDefStack::HasUndefVars(const PrimExpr& expr) {
+bool VarDefStackNode::HasUndefVars(const PrimExpr& expr) const {
   // SizeVar is seen as constant and doesn't count.
   bool has_undef = false;
   auto CheckUndef = [&has_undef, this](const ObjectRef& obj) {
@@ -119,13 +138,13 @@ Array<SizeVar> VarContextNode::GetSplitVars(PrimExpr extent, size_t n_splits, bo
   ++this->split_counter;
   extent = Analyzer().canonical_simplify(extent);
   this->split_groups.push_back(SplitGroup(extent, var_names, whole_div));
-  if (this->var_defs.HasUndefVars(extent)) {
+  if (this->var_defs->HasUndefVars(extent)) {
     // Don't put non-const extents in the map. They can contain loop variables that are removed in
     // later transformation steps, and we can't keep track of that.
     ICHECK(n_splits == 1 && !whole_div);
     return vars;
   }
-  Var quotient = AllocVarForExpr(extent / product, false);
+  Var quotient = AllocVarForExpr(extent / product);
   this->div_map.emplace(extent, product * quotient);
   return vars;
 }
@@ -148,19 +167,19 @@ std::pair<PrimExpr, PrimExpr> VarContextNode::GetSplitSizes(PrimExpr extent, Pri
 }
 
 void VarContextNode::DefineVar(const std::string& name, PrimExpr expr) {
-  this->var_defs.Append(name, expr);
+  this->var_defs->Append(name, expr);
 }
 
 PrimExpr VarContextNode::DefineConstShorthand(PrimExpr expr) {
-  if (!this->var_defs.HasUndefVars(expr) && CountOps(expr) >= 10) {
-    expr = this->AllocVarForExpr(arith::SimplifyExpr(expr), true);
+  if (!this->var_defs->HasUndefVars(expr) && CountOps(expr) >= 10) {
+    expr = this->AllocVarForExpr(arith::SimplifyExpr(expr));
   }
   return expr;
 }
 
-Var VarContextNode::AllocVarForExpr(PrimExpr expr, bool is_shorthand) {
-  std::string name = (is_shorthand ? "v" : "d") + std::to_string(this->var_defs.Size());
-  return this->var_defs.FindOrAppend(name, expr);
+Var VarContextNode::AllocVarForExpr(PrimExpr expr) {
+  std::string name = "v" + std::to_string(this->var_defs->Size());
+  return this->var_defs->FindOrAppend(name, expr);
 }
 
 std::pair<PrimExpr, PrimExpr> VarContextNode::SymbolicDiv(PrimExpr numer, PrimExpr denom,
@@ -180,12 +199,12 @@ std::pair<PrimExpr, PrimExpr> VarContextNode::SymbolicDiv(PrimExpr numer, PrimEx
   }
 }
 
-TVM_REGISTER_GLOBAL("arith.VarMapToStr").set_body_typed([](VarContext context) {
-  std::ostringstream os;
-  for (auto& [k, v] : context->var_defs.GetExprs()) {
-    os << k << " = " << v << "\n";
+TVM_REGISTER_GLOBAL("arith.VarContextGetVarDefs").set_body_typed([](VarContext context) {
+  Array<Array<ObjectRef>> ret;
+  for (const auto& pair : context->var_defs->GetExprs()) {
+    ret.push_back(Array<ObjectRef>({pair->var, pair->expr}));
   }
-  return String(os.str());
+  return ret;
 });
 
 }  // namespace arith

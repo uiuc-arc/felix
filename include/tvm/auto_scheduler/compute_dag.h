@@ -189,7 +189,6 @@ class ComputeDAGNode : public Object {
     v->Visit("flop_ct", &flop_ct);
     v->Visit("flop_ct_expr", &flop_ct_expr);
     v->Visit("init_state", &init_state);
-    v->Visit("access_analyzer", &access_analyzer);
   }
 
   void SetFLOPs(PrimExpr flop_ct_expr) {

@@ -1,7 +1,7 @@
 import logging
 import pickle as pkl
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
 import onnx
 from torch import nn
@@ -20,13 +20,22 @@ __all__ = [
     "batch_create_tasks",
     "extract_tasks",
     "extract_tasks_",
+    "load_and_register_tasks",
+    "load_and_register_tasks_",
 ]
 AnsorTaskWeight = Tuple[ansor.SearchTask, int]
 
 
+class TaskInstance(NamedTuple):
+    idx: int
+    weight: int
+    sizes: dict
+    ansor_task: ansor.SearchTask
+
+
 class SymTaskAndInstances(NamedTuple):
     task: "SymTask"
-    instances: List[Tuple[int, int, dict]]
+    instances: List[TaskInstance]
 
 
 class SymTask:
@@ -42,7 +51,7 @@ class SymTask:
         self.ansor_task, self.ansor_policy = self.make_task_from_dag(sym_ansor_dag)
         sketches = ffi.generate_all_sym_sketches(self.ansor_policy)
         self.sketches = [Sketch(self, sketch) for sketch in sketches]
-        self._backbone_to_sketch = defaultdict(list)
+        self._backbone_to_sketch: Dict[tuple, List[Sketch]] = defaultdict(list)
         for sketch in self.sketches:
             self._backbone_to_sketch[sketch.backbone].append(sketch)
 
@@ -102,7 +111,7 @@ def batch_create_tasks(
     progress: bool = True,
 ):
     n_total, n_no_ansor_dag, n_no_nx_dag, n_no_sketches = len(tasks), 0, 0, 0
-    grouped: Dict[SymbolicDAG, List[Tuple[int, int, dict]]] = defaultdict(list)
+    grouped: Dict[SymbolicDAG, List[TaskInstance]] = defaultdict(list)
     tasks_ = tqdm(tasks) if progress else tasks
     for i, (task, weight) in enumerate(tasks_):
         concrete_dag = task.compute_dag
@@ -111,13 +120,14 @@ def batch_create_tasks(
             n_no_nx_dag += 1
             continue
         sym_dag, size_dict = dag_result
-        grouped[sym_dag].append((i, weight, size_dict))
+        grouped[sym_dag].append(TaskInstance(i, weight, size_dict, task))
     _logger.info(f"Found {len(grouped)} tasks from {n_total} concrete tasks")
     ret_groups: List[SymTaskAndInstances] = []
     log_print = []
     grouped_ = tqdm(grouped.items(), total=len(grouped)) if progress else grouped.items()
     for sym_dag, instances in grouped_:
-        indices, _, size_dicts = utils.transpose3(instances)
+        indices = [instance.idx for instance in instances]
+        size_dicts = [instance.sizes for instance in instances]
         size_params, _ = utils.coalesce_dicts(size_dicts)
         _logger.debug(f"Creating DAG {repr(sym_dag)} (task indices {indices})")
         ansor_dag = sym_dag.make_ansor_compute_dag(None)
@@ -139,7 +149,7 @@ def batch_create_tasks(
             ]
             log_print.append(f"  Sketches:{''.join(sketches)}")
             log_print.append(f"  Size params: {size_params}")
-            for index, weight, size_dict in instances:
+            for index, weight, size_dict, _ in instances:
                 flops = task.get_flops(size_dict)
                 log_print.append(
                     f"  task {index}; {flops / 1e6:.4f} * {weight} MFLOPs\n"
@@ -181,6 +191,27 @@ def extract_tasks(
 
 def extract_tasks_(model, example_inputs=None, save_to=None, entry_pt_name=None):
     tasks = extract_tasks(model, example_inputs, save_to, entry_pt_name)
-    return [
-        (idx, task, weight, sizes) for task, instances in tasks for idx, weight, sizes in instances
-    ]
+    return [(sym_task, instance) for sym_task, instances in tasks for instance in instances]
+
+
+def load_and_register_tasks(task_pkl: utils.PathLike):
+    with open(task_pkl, "rb") as f:
+        tasks = pkl.load(f)
+    assert (
+        isinstance(tasks, list)
+        and len(tasks) > 0
+        and all(isinstance(x, SymTaskAndInstances) for x in tasks)
+    )
+    tasks = cast(List[SymTaskAndInstances], tasks)
+    for _, instances in tasks:
+        for inst in instances:
+            ansor_task = inst.ansor_task
+            ansor.workload_registry.register_workload_tensors(
+                ansor_task.workload_key, ansor_task.compute_dag.tensors
+            )
+    return tasks
+
+
+def load_and_register_tasks_(task_pkl: utils.PathLike):
+    tasks = load_and_register_tasks(task_pkl)
+    return [(sym_task, instance) for sym_task, instances in tasks for instance in instances]
