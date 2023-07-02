@@ -11,9 +11,12 @@ namespace arith {
 
 using VarMapT = std::unordered_map<std::string, PrimExpr>;
 
+bool ExprIsConstant(const PrimExpr& expr);
+bool ExprIsShapeConstant(const PrimExpr& expr);
+
 class VarExprPairNode : public Object {
  public:
-  VarExprPairNode(Var var, PrimExpr expr) : var(std::move(var)), expr(std::move(expr)) {}
+  VarExprPairNode(tir::SizeVar var, PrimExpr expr) : var(std::move(var)), expr(std::move(expr)) {}
   VarExprPairNode() = default;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
@@ -24,14 +27,15 @@ class VarExprPairNode : public Object {
   static constexpr const char* _type_key = "arith.VarExprPair";
   TVM_DECLARE_FINAL_OBJECT_INFO(VarExprPairNode, Object);
 
-  Var var;
+  tir::SizeVar var;
   PrimExpr expr;
 };
 
 class VarExprPair : public ObjectRef {
  public:
-  VarExprPair(Var var, PrimExpr expr) : VarExprPair(make_object<VarExprPairNode>(var, expr)) {}
-  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(VarExprPair, ObjectRef, VarExprPairNode);
+  VarExprPair(tir::SizeVar var, PrimExpr expr)
+      : VarExprPair(make_object<VarExprPairNode>(var, expr)) {}
+  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(VarExprPair, ObjectRef, VarExprPairNode);
 };
 
 class VarDefStackNode : public Object {
@@ -47,8 +51,9 @@ class VarDefStackNode : public Object {
     // No need to save expr2idx (just a memo table)
   }
 
-  Var Append(const std::string& vname, const PrimExpr& expr);
-  Var FindOrAppend(const std::string& vname, const PrimExpr& expr);
+  tir::SizeVar Append(const std::string& vname, const PrimExpr& expr);
+  void Append(const tir::SizeVar& var, const PrimExpr& expr);
+  tir::SizeVar FindOrAppend(const std::string& vname, const PrimExpr& expr);
 
   VarDefStackNode Prepend(const VarMapT& vmap) const;
   VarMapT IntoVarMap() const;
@@ -58,6 +63,12 @@ class VarDefStackNode : public Object {
   }
   size_t Size() const { return this->exprs.size(); }
   const ContainerT& GetExprs() const { return this->exprs; }
+  PrimExpr& GetExprAt(const std::string& vname) {
+    auto it = this->var2idx.find(vname);
+    ICHECK(it != this->var2idx.end()) << "Var " << vname << " not found in VarDefStack";
+    return this->exprs[(*it).second]->expr;
+  }
+
   std::vector<Var> FreeVars() const;
   bool HasUndefVars(const PrimExpr& expr) const;
 
@@ -78,28 +89,28 @@ class VarDefStack : public ObjectRef {
 
 class SplitGroupNode : public Object {
  public:
-  SplitGroupNode(PrimExpr extent, Array<String> vars, bool whole_div)
-      : extent(std::move(extent)), vars(std::move(vars)), whole_div(whole_div) {}
+  SplitGroupNode(tir::SizeVar extent, tir::SizeVar quotient, Array<String> vars)
+      : extent(std::move(extent)), quotient(std::move(quotient)), vars(std::move(vars)) {}
   SplitGroupNode() = default;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
     v->Visit("extent", &extent);
+    v->Visit("quotient", &quotient);
     v->Visit("vars", &vars);
-    v->Visit("whole_div", &whole_div);
   }
 
   static constexpr const char* _type_key = "arith.SplitGroupNode";
   TVM_DECLARE_FINAL_OBJECT_INFO(SplitGroupNode, Object);
 
-  PrimExpr extent;
+  tir::SizeVar extent, quotient;
   Array<String> vars;
-  bool whole_div;
 };
 
 class SplitGroup : public ObjectRef {
  public:
-  SplitGroup(PrimExpr extent, Array<String> vars, bool whole_div)
-      : SplitGroup(make_object<SplitGroupNode>(extent, vars, whole_div)) {}
+  SplitGroup(tir::SizeVar extent, tir::SizeVar quotient, Array<String> vars)
+      : SplitGroup(make_object<SplitGroupNode>(extent, quotient, vars)) {}
+  SplitGroup() : SplitGroup(make_object<SplitGroupNode>()) {}
 
   TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(SplitGroup, ObjectRef, SplitGroupNode);
 };
@@ -111,8 +122,8 @@ class VarContextNode : public Object {
     v->Visit("var_defs", &this->var_defs);
   }
 
-  Array<tir::SizeVar> GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div);
-  std::pair<PrimExpr, PrimExpr> GetSplitSizes(PrimExpr extent, PrimExpr factor,
+  Array<tir::SizeVar> GetSplitVars(const PrimExpr& extent, size_t n_splits, bool whole_div);
+  std::pair<PrimExpr, PrimExpr> GetSplitSizes(const PrimExpr& extent, PrimExpr factor,
                                               bool no_tighten_factor);
 
   void DefineVar(const std::string& name, PrimExpr expr);
@@ -132,7 +143,7 @@ class VarContextNode : public Object {
   VarDefStack var_defs{};
 
  private:
-  std::unordered_multimap<PrimExpr, PrimExpr, StructuralHash, StructuralEqual> div_map{};
+  std::vector<std::pair<PrimExpr, PrimExpr>> div_extents{};
   size_t split_counter{};
 };
 
@@ -154,7 +165,7 @@ namespace json {
 
 template <typename T>
 struct Handler<tvm::Array<T>> {
-  inline static void Write(dmlc::JSONWriter* writer, const tvm::Array<T>& array) {
+  inline static void Write(JSONWriter* writer, const tvm::Array<T>& array) {
     writer->BeginArray();
     for (const auto& item : array) {
       writer->WriteArrayItem(item);
@@ -162,7 +173,7 @@ struct Handler<tvm::Array<T>> {
     writer->EndArray();
   }
 
-  inline static void Read(dmlc::JSONReader* reader, tvm::Array<T>* array) {
+  inline static void Read(JSONReader* reader, tvm::Array<T>* array) {
     array->clear();
     reader->BeginArray();
     while (reader->NextArrayItem()) {
@@ -174,34 +185,47 @@ struct Handler<tvm::Array<T>> {
 };
 
 template <>
+struct Handler<tvm::tir::SizeVar> {
+  static void Write(JSONWriter* writer, const tvm::tir::SizeVar& var) {
+    writer->Write((tvm::PrimExpr)var);
+  }
+  static void Read(JSONReader* reader, tvm::tir::SizeVar* var) {
+    tvm::PrimExpr expr;
+    reader->Read(&expr);
+    auto* sv = expr.as<tvm::tir::SizeVarNode>();
+    ICHECK(sv) << "Expected SizeVar, got " << expr;
+    *var = tvm::GetRef<tvm::tir::SizeVar>(sv);
+  }
+};
+
+template <>
 struct Handler<tvm::arith::SplitGroup> {
-  inline static void Write(dmlc::JSONWriter* writer, const tvm::arith::SplitGroup& group) {
+  inline static void Write(JSONWriter* writer, const tvm::arith::SplitGroup& group) {
     writer->BeginArray();
     writer->WriteArrayItem(group->extent);
+    writer->WriteArrayItem(group->quotient);
     writer->WriteArrayItem(group->vars);
-    writer->WriteArrayItem(group->whole_div);
     writer->EndArray();
   }
 
-  inline static void Read(dmlc::JSONReader* reader, tvm::arith::SplitGroup* group) {
-    tvm::PrimExpr extent;
+  inline static void Read(JSONReader* reader, tvm::arith::SplitGroup* group) {
+    tvm::tir::SizeVar extent, quotient;
     tvm::Array<tvm::String> vars;
-    bool whole_div;
     reader->BeginArray();
     ICHECK(reader->NextArrayItem());
     reader->Read(&extent);
     ICHECK(reader->NextArrayItem());
-    reader->Read(&vars);
+    reader->Read(&quotient);
     ICHECK(reader->NextArrayItem());
-    reader->Read(&whole_div);
+    reader->Read(&vars);
     ICHECK(!reader->NextArrayItem());
-    *group = tvm::arith::SplitGroup(std::move(extent), std::move(vars), whole_div);
+    *group = tvm::arith::SplitGroup(extent, quotient, vars);
   }
 };
 
 template <>
 struct Handler<tvm::arith::VarDefStack> {
-  inline static void Write(dmlc::JSONWriter* writer, const tvm::arith::VarDefStack& vmap) {
+  inline static void Write(JSONWriter* writer, const tvm::arith::VarDefStack& vmap) {
     writer->BeginObject();
     for (const auto& pair : vmap->GetExprs()) {
       writer->WriteObjectKeyValue(pair->var->name_hint, pair->expr);
@@ -209,7 +233,7 @@ struct Handler<tvm::arith::VarDefStack> {
     writer->EndObject();
   }
 
-  inline static void Read(dmlc::JSONReader* reader, tvm::arith::VarDefStack* group) {
+  inline static void Read(JSONReader* reader, tvm::arith::VarDefStack* group) {
     *group = tvm::arith::VarDefStack();
     reader->BeginObject();
     std::string vname;

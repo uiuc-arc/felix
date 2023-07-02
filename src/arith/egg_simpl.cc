@@ -25,9 +25,25 @@ class PreorderPrinter : public ExprFunctor<void(const PrimExpr&)> {
     return ret;
   }
 
+  void VisitExpr_(const SizeVarNode* op) override {
+    this->var_map.Set(op->name_hint, GetRef<SizeVar>(op));
+    if (op->kind == SizeVarKind::kShapeVar) {
+      ss << op->name_hint << ":s";
+    } else if (op->kind == SizeVarKind::kScheduleKnob) {
+      ss << op->name_hint << ":k";
+    } else if (op->kind == SizeVarKind::kShorthand) {
+      ss << op->name_hint << ":v";
+    } else {
+      LOG_FATAL << "Unknown SizeVarKind: " << (int)op->kind;
+    }
+  }
+
   void VisitExpr_(const VarNode* op) override {
     this->var_map.Set(op->name_hint, GetRef<Var>(op));
-    ss << op->name_hint << ":" << (op->dtype.is_bool() ? "b" : "i");
+    ss << op->name_hint;
+    if (op->dtype.is_bool()) {
+      ss << ":b";
+    }
   }
 
   void VisitExpr_(const IntImmNode* op) override {
@@ -139,6 +155,14 @@ PrimExpr MakeSelect(std::vector<PrimExpr> args) {
   return select(std::move(args[0]), std::move(args[1]), std::move(args[2]));
 }
 
+std::pair<std::string, char> SplitVarParts(const std::string& str) {
+  if (str.size() > 2 && str[str.size() - 2] == ':') {
+    return {str.substr(0, str.size() - 2), str.back()};
+  } else {
+    return {str, (char)0};
+  }
+}
+
 std::pair<PrimExpr, size_t> ParseExprPreorder(const std::string& str,
                                               const Optional<Map<String, Var>>& var_map,
                                               size_t loc = 0) {
@@ -148,18 +172,28 @@ std::pair<PrimExpr, size_t> ParseExprPreorder(const std::string& str,
       return Bool(true);
     } else if (str == "false") {
       return Bool(false);
-    } else if (str.size() > 1 && str[str.size() - 2] == ':') {
-      DataType datatype(str.back() == 'b' ? DataType::Bool() : DataType::Int(32));
-      auto var_name = str.substr(0, str.size() - 2);
+    } else if (str == "inf" || str == "-inf") {
+      throw std::runtime_error("Inf not supported");
+    } else if (std::isalpha(str[0]) || str[0] == '_') {
+      auto [var_name, annot] = SplitVarParts(str);
       if (var_map) {
         auto var = var_map.value().Get(var_name);
         ICHECK(var.defined()) << "Undefined variable: " << str;
-        ICHECK(var.value()->dtype == datatype)
-            << "Variable " << str << " has type " << var.value()->dtype << " but expected "
-            << datatype;
         return var.value();
-      } else {
-        return Var(var_name, datatype);
+      }
+      switch (annot) {
+        case 'b':
+          return Var(var_name, DataType::Bool());
+        case 's':
+          return SizeVar(var_name, SizeVarKind::kShapeVar);
+        case 'k':
+          return SizeVar(var_name, SizeVarKind::kScheduleKnob);
+        case 'v':
+          return SizeVar(var_name, SizeVarKind::kShorthand);
+        case 0:
+          return Var(var_name, DataType::Int(32));
+        default:
+          throw std::runtime_error("Unknown annotation: " + str);
       }
     }
     auto is_digit = [](char c) { return std::isdigit(c); };
@@ -168,9 +202,7 @@ std::pair<PrimExpr, size_t> ParseExprPreorder(const std::string& str,
     if (all_digits || neg_all_digits) {
       return Integer(std::stoll(str));
     }
-    if (str == "inf" || str == "-inf") {
-      throw std::runtime_error("Inf not supported");
-    }
+
     return FloatImm(DataType::Float(32), std::stof(str));
   };
 
@@ -294,7 +326,15 @@ PrimExpr SubAndSimplify(const PrimExpr& expr,
   if (!changed && simpl_only_on_change) {
     return expr;
   }
-  return SimplifyExpr(expr_, max_n_iters, max_n_nodes, false);
+  return SimplifyExpr(expr_, max_n_iters, max_n_nodes, true);
+}
+
+bool IsExprEquivalent(const PrimExpr& lhs, const PrimExpr& rhs, size_t max_n_iters,
+                      size_t max_n_nodes, bool diff_approx) {
+  PreorderPrinter printer;
+  auto lhs_str = printer.Print(lhs), rhs_str = printer.Print(rhs);
+  return is_equivalent(lhs_str.c_str(), rhs_str.c_str(), false, max_n_iters, max_n_nodes,
+                       diff_approx);
 }
 
 String PrintExprPrefix(const PrimExpr& expr) {
@@ -307,12 +347,7 @@ PrimExpr ParseExprPrefix(const String& str) {
 }
 
 TVM_REGISTER_GLOBAL("arith.SimplifyExprStr").set_body_typed(SimplifyExprStr);
-TVM_REGISTER_GLOBAL("arith.IsExprEquivalent")
-    .set_body_typed([](PrimExpr e1, PrimExpr e2, size_t n_iters, size_t n_nodes) {
-      PreorderPrinter printer;
-      auto se1 = printer.Print(e1), se2 = printer.Print(e2);
-      return is_equivalent(se1.c_str(), se2.c_str(), false, n_iters, n_nodes, false);
-    });
+TVM_REGISTER_GLOBAL("arith.IsExprEquivalent").set_body_typed(IsExprEquivalent);
 TVM_REGISTER_GLOBAL("arith.IsExprStrEquivalent")
     .set_body_typed([](String se1, String se2, size_t n_iters, size_t n_nodes, bool diff_approx) {
       return is_equivalent(se1.c_str(), se2.c_str(), true, n_iters, n_nodes, diff_approx);

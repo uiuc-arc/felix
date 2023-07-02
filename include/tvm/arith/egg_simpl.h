@@ -25,6 +25,9 @@ PrimExpr SubAndSimplify(const PrimExpr& expr,
                         bool simpl_only_on_change, size_t max_n_iters = 30,
                         size_t max_n_nodes = 10000);
 
+bool IsExprEquivalent(const PrimExpr& lhs, const PrimExpr& rhs, size_t max_n_iters = 30,
+                      size_t max_n_nodes = 10000, bool diff_approx = false);
+
 String PrintExprPrefix(const PrimExpr& expr);
 
 PrimExpr ParseExprPrefix(const String& str);

@@ -25,7 +25,7 @@ def subst_by_name(expr: tir.PrimExpr, kvs: Dict[str, tir.PrimExpr]) -> tir.PrimE
 
 
 def is_expr_equivalent(e1: tir.PrimExpr, e2: tir.PrimExpr) -> bool:
-    return _arith.IsExprEquivalent(e1, e2, 30, 10000)
+    return _arith.IsExprEquivalent(e1, e2, 30, 10000, False)
 
 
 def print_expr_preorder(expr: tir.PrimExpr) -> str:

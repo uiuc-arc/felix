@@ -130,16 +130,23 @@ class Var : public PrimExpr {
   using ContainerType = VarNode;
 };
 
+enum class SizeVarKind {
+  kShapeVar = 0,
+  kScheduleKnob = 1,
+  kShorthand = 2,
+  kOther = 3,
+};
+
 /*!
  * \brief A variable node represent a tensor index size,
  * whose value must be non-negative.
  */
 class SizeVarNode : public VarNode {
  public:
-  bool is_const_symbol;
+  SizeVarKind kind;
 
   void VisitAttrs(AttrVisitor* v) {
-    v->Visit("is_const_symbol", &is_const_symbol);
+    v->Visit("kind", &kind);
     VarNode::VisitAttrs(v);
   }
 
@@ -158,7 +165,10 @@ class SizeVar : public Var {
    * \param span The location of this object in the source code.
    */
   TVM_DLL explicit SizeVar(String name_hint = "s", DataType t = DataType::Int(32),
-                           Span span = Span(), bool is_const_symbol = false);
+                           Span span = Span());
+
+  explicit SizeVar(String name_hint, SizeVarKind kind, DataType t = DataType::Int(32),
+                   Span span = Span());
 
   /*!
    * \brief Get pointer to the internal value.

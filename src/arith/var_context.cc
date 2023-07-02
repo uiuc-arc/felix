@@ -33,7 +33,18 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
       p->stream << "}";
     });
 
-inline bool HasDiv(const PrimExpr& expr) {
+TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
+    .set_dispatch<SplitGroupNode>([](const ObjectRef& node, ReprPrinter* p) {
+      auto* op = static_cast<const SplitGroupNode*>(node.get());
+      if (op->quotient.defined()) {
+        p->stream << "SplitGroup(" << op->extent << " / " << op->vars << " = " << op->quotient
+                  << ")";
+      } else {
+        p->stream << "SplitGroup(" << op->extent << " // " << op->vars << ")";
+      }
+    });
+
+bool HasDiv(const PrimExpr& expr) {
   bool found = false;
   PostOrderVisit(expr, [&expr, &found](const ObjectRef& node) {
     if (node->IsInstance<DivNode>()) {
@@ -43,23 +54,48 @@ inline bool HasDiv(const PrimExpr& expr) {
   return found;
 }
 
-Var VarDefStackNode::Append(const std::string& vname, const PrimExpr& expr) {
-  auto it = this->var2idx.find(vname);
-  if (it == this->var2idx.end()) {
-    this->var2idx.Set(vname, this->exprs.size());
-    this->expr2idx.emplace(expr, this->exprs.size());
-    tir::Var var(vname, expr->dtype);
-    this->exprs.push_back(VarExprPair(var, expr));
-    return var;
-  } else {
-    size_t idx = (*it).second;
-    auto& pair = this->exprs[idx];
-    this->exprs.Set(idx, VarExprPair(pair->var, expr));
-    return pair->var;
-  }
+bool ExprIsConstant(const PrimExpr& expr) {
+  bool is_const = true;
+  PostOrderVisit(expr, [&is_const](const ObjectRef& node) {
+    if (node->IsInstance<VarNode>()) {
+      auto* svnode = node.as<SizeVarNode>();
+      if (!svnode || svnode->kind == SizeVarKind::kOther) {
+        is_const = false;
+      }
+    }
+  });
+  return is_const;
 }
 
-Var VarDefStackNode::FindOrAppend(const std::string& vname, const PrimExpr& expr) {
+bool ExprIsShapeConstant(const PrimExpr& expr) {
+  bool shape_var_only = true;
+  PostOrderVisit(expr, [&shape_var_only](const ObjectRef& node) {
+    if (node->IsInstance<VarNode>()) {
+      auto* svnode = node.as<tir::SizeVarNode>();
+      if (!svnode || svnode->kind != SizeVarKind::kShapeVar) {
+        shape_var_only = false;
+      }
+    }
+  });
+  return shape_var_only;
+}
+
+SizeVar VarDefStackNode::Append(const std::string& vname, const PrimExpr& expr) {
+  SizeVar ret(vname, SizeVarKind::kShorthand, expr.dtype());
+  this->Append(ret, expr);
+  return ret;
+}
+
+void VarDefStackNode::Append(const SizeVar& var, const PrimExpr& expr) {
+  ICHECK(expr.defined());
+  ICHECK(ExprIsConstant(expr)) << "Expression " << expr
+                               << " is not constant and cannot be inserted into VarDefStack";
+  this->var2idx.Set(var->name_hint, this->exprs.size());
+  this->expr2idx.emplace(expr, this->exprs.size());
+  this->exprs.push_back(VarExprPair(var, expr));
+}
+
+SizeVar VarDefStackNode::FindOrAppend(const std::string& vname, const PrimExpr& expr) {
   auto it = this->expr2idx.find(expr);
   if (it != this->expr2idx.end()) {
     return this->exprs[it->second]->var;
@@ -103,14 +139,15 @@ std::vector<Var> VarDefStackNode::FreeVars() const {
 }
 
 bool VarDefStackNode::HasUndefVars(const PrimExpr& expr) const {
-  // SizeVar is seen as constant and doesn't count.
+  // SizeVar is seen as constant and doesn't count unless it has kOther type.
   bool has_undef = false;
   auto CheckUndef = [&has_undef, this](const ObjectRef& obj) {
-    auto* vnode = obj.as<VarNode>();
-    auto* svnode = obj.as<SizeVarNode>();
-    if (vnode && this->var2idx.count(vnode->name_hint) == 0 &&
-        !(svnode && svnode->is_const_symbol)) {
-      has_undef = true;
+    if (auto* vnode = obj.as<VarNode>()) {
+      auto* svnode = obj.as<SizeVarNode>();
+      if (this->var2idx.count(vnode->name_hint) == 0 &&
+          (!svnode || svnode->kind == SizeVarKind::kOther)) {
+        has_undef = true;
+      }
     }
   };
   tir::PostOrderVisit(expr, CheckUndef);
@@ -124,32 +161,44 @@ inline std::pair<PrimExpr, PrimExpr> ConservativeDiv(PrimExpr extent, PrimExpr f
   return std::make_pair(min_factor, divided);
 }
 
-Array<SizeVar> VarContextNode::GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div) {
+Array<SizeVar> VarContextNode::GetSplitVars(const PrimExpr& extent, size_t n_splits,
+                                            bool whole_div) {
+  std::string group_idx = std::to_string(this->split_counter++);
   Array<SizeVar> vars;
   Array<String> var_names;
   PrimExpr product = 1;
   for (size_t i = 0; i < n_splits; i++) {
-    String name = "sp_" + std::to_string(this->split_counter) + "_" + std::to_string(i);
-    SizeVar var(name, DataType::Int(32), Span(), true);
+    String name = "sp_" + group_idx + "_" + std::to_string(i);
+    SizeVar var(name, SizeVarKind::kScheduleKnob);
     vars.push_back(var);
     var_names.push_back(name);
     product *= var;
   }
-  ++this->split_counter;
-  extent = Analyzer().canonical_simplify(extent);
-  this->split_groups.push_back(SplitGroup(extent, var_names, whole_div));
-  if (this->var_defs->HasUndefVars(extent)) {
-    // Don't put non-const extents in the map. They can contain loop variables that are removed in
-    // later transformation steps, and we can't keep track of that.
-    ICHECK(n_splits == 1 && !whole_div);
+  if (!whole_div) {
+    // No need to add a SplitGroup if not whole_div.
     return vars;
   }
-  Var quotient = AllocVarForExpr(extent / product);
-  this->div_map.emplace(extent, product * quotient);
+  // Don't put non-const extents in the map. They can contain loop variables that are removed in
+  // later transformation steps, and we can't keep track of that.
+  ICHECK(ExprIsShapeConstant(extent));
+  // Replace the extent with a (possibly) shorter symbol E{i}.
+  // * Consider this a shape variable even though it can be a shape expression. This will be
+  //   important later.
+  SizeVar extent_var("E" + group_idx, SizeVarKind::kShapeVar);
+  this->var_defs->Append(extent_var, extent);
+  // Declare a quotient variable which would be equal to Ei / (sp_i_0*sp_i_1*...sp_i_j), as
+  // qi. For example q3 could be Cout / (sp_3_0 * sp_3_1 * sp_3_2...) for group 3.
+  // * Don't even define this variable in this->var_defs. We'll need to delay the expansion of q{i}
+  //   as much as possible, and when finally it's needed it can be derived from the SplitGroup.
+  SizeVar quotient("q" + group_idx, SizeVarKind::kShorthand);
+  // Say that Extent_i and qi * (sp_i_0 * sp_i_1 * sp_i_2...) are equivalent.
+  // This is useful when we figure out divisibility later.
+  this->div_extents.emplace_back(extent, product * quotient);
+  this->split_groups.push_back(SplitGroup(extent_var, quotient, var_names));
   return vars;
 }
 
-std::pair<PrimExpr, PrimExpr> VarContextNode::GetSplitSizes(PrimExpr extent, PrimExpr factor,
+std::pair<PrimExpr, PrimExpr> VarContextNode::GetSplitSizes(const PrimExpr& extent, PrimExpr factor,
                                                             bool no_tighten_factor) {
   // Fast path for when the inputs are not symbolic.
   if (is_const_int(extent) && is_const_int(factor)) {
@@ -161,9 +210,7 @@ std::pair<PrimExpr, PrimExpr> VarContextNode::GetSplitSizes(PrimExpr extent, Pri
     // 1 splitted by anything is still (1, 1).
     return {extent, extent};
   }
-  extent = Analyzer().canonical_simplify(extent);
-  auto [min_factor, divided] = this->SymbolicDiv(extent, factor, no_tighten_factor);
-  return {this->DefineConstShorthand(min_factor), this->DefineConstShorthand(divided)};
+  return this->SymbolicDiv(extent, factor, no_tighten_factor);
 }
 
 void VarContextNode::DefineVar(const std::string& name, PrimExpr expr) {
@@ -184,19 +231,19 @@ Var VarContextNode::AllocVarForExpr(PrimExpr expr) {
 
 std::pair<PrimExpr, PrimExpr> VarContextNode::SymbolicDiv(PrimExpr numer, PrimExpr denom,
                                                           bool no_tighten_factor) {
-  auto [begin, end] = this->div_map.equal_range(numer);
-  for (; begin != end; ++begin) {
-    PrimExpr simpl = SimplifyExpr(begin->second / denom);
-    if (!HasDiv(simpl)) {
-      return {denom, simpl};
-    }
-  }
   PrimExpr simpl = SimplifyExpr(numer / denom);
-  if (HasDiv(simpl)) {
-    return ConservativeDiv(numer, denom, no_tighten_factor);
-  } else {
+  if (!HasDiv(simpl)) {
     return {denom, simpl};
   }
+  for (auto &[extent, subst]: this->div_extents) {
+    if (IsExprEquivalent(numer, extent)) {
+      PrimExpr simpl = SimplifyExpr(subst / denom);
+      if (!HasDiv(simpl)) {
+        return {denom, simpl};
+      }
+    }
+  }
+  return ConservativeDiv(numer, denom, no_tighten_factor);
 }
 
 TVM_REGISTER_GLOBAL("arith.VarContextGetVarDefs").set_body_typed([](VarContext context) {

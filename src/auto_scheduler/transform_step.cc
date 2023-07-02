@@ -675,7 +675,7 @@ PrimExpr ParseUnrollStep(const std::string& pragma) {
   if (IsNumber(num_or_var)) {
     return std::stoi(num_or_var);
   } else {
-    return SizeVar(num_or_var, DataType::Int(32), Span(), true);
+    return SizeVar(num_or_var, SizeVarKind::kScheduleKnob);
   }
 }
 
