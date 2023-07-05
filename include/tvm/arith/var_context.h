@@ -6,6 +6,8 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
 
+#include <optional>
+
 namespace tvm {
 namespace arith {
 
@@ -35,14 +37,11 @@ class VarExprPair : public ObjectRef {
  public:
   VarExprPair(tir::SizeVar var, PrimExpr expr)
       : VarExprPair(make_object<VarExprPairNode>(var, expr)) {}
-  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(VarExprPair, ObjectRef, VarExprPairNode);
+  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(VarExprPair, ObjectRef, VarExprPairNode);
 };
 
 class VarDefStackNode : public Object {
-  using ContainerT = Array<VarExprPair>;
-  using ExprVisitor = std::function<PrimExpr(const PrimExpr& e)>;
-  using ThreadedExprVisitor = std::function<PrimExpr(const PrimExpr& e, size_t)>;
-  using VarExprVisitor = std::function<PrimExpr(const Var& v, const PrimExpr& e)>;
+  using ExprMutator = std::function<PrimExpr(const PrimExpr& e)>;
 
  public:
   void VisitAttrs(tvm::AttrVisitor* v) {
@@ -53,32 +52,36 @@ class VarDefStackNode : public Object {
 
   tir::SizeVar Append(const std::string& vname, const PrimExpr& expr);
   void Append(const tir::SizeVar& var, const PrimExpr& expr);
-  tir::SizeVar FindOrAppend(const std::string& vname, const PrimExpr& expr);
-
-  VarDefStackNode Prepend(const VarMapT& vmap) const;
-  VarMapT IntoVarMap() const;
+  PrimExpr DefineConstShorthand(PrimExpr expr);
 
   bool Contains(const std::string& vname) const {
     return this->var2idx.find(vname) != this->var2idx.end();
   }
   size_t Size() const { return this->exprs.size(); }
-  const ContainerT& GetExprs() const { return this->exprs; }
-  PrimExpr& GetExprAt(const std::string& vname) {
+
+  const Array<VarExprPair>& GetExprs() const { return this->exprs; }
+  const PrimExpr& GetExprAt(const std::string& vname) const {
     auto it = this->var2idx.find(vname);
     ICHECK(it != this->var2idx.end()) << "Var " << vname << " not found in VarDefStack";
     return this->exprs[(*it).second]->expr;
   }
 
-  std::vector<Var> FreeVars() const;
-  bool HasUndefVars(const PrimExpr& expr) const;
+  VarMapT IntoUnwindedVarMap() const;
+  std::unordered_set<std::string> GetAllUsedVars(std::optional<tir::SizeVarKind> kind) const;
+
+  void MapExprs(ExprMutator func);
+  void MapExprsParallel(ExprMutator func);
 
   static constexpr const char* _type_key = "arith.VarDefStack";
   TVM_DECLARE_FINAL_OBJECT_INFO(VarDefStackNode, Object);
 
  private:
-  ContainerT exprs;
+  Array<VarExprPair> exprs;
   Map<String, Integer> var2idx;
   std::unordered_map<PrimExpr, size_t, StructuralHash, StructuralEqual> expr2idx;
+
+  friend class VarDefStack;
+  friend class dmlc::json::Handler<VarDefStackNode>;
 };
 
 class VarDefStack : public ObjectRef {
@@ -125,20 +128,17 @@ class VarContextNode : public Object {
   Array<tir::SizeVar> GetSplitVars(const PrimExpr& extent, size_t n_splits, bool whole_div);
   std::pair<PrimExpr, PrimExpr> GetSplitSizes(const PrimExpr& extent, PrimExpr factor,
                                               bool no_tighten_factor);
+  PrimExpr DefineConstShorthand(PrimExpr expr) {
+    return this->var_defs->DefineConstShorthand(expr);
+  }
 
-  void DefineVar(const std::string& name, PrimExpr expr);
-
-  PrimExpr DefineConstShorthand(PrimExpr expr);
-
- private:
-  Var AllocVarForExpr(PrimExpr expr);
-
-  std::pair<PrimExpr, PrimExpr> SymbolicDiv(PrimExpr numer, PrimExpr denom, bool no_tighten_factor);
-
- public:
   static constexpr const char* _type_key = "arith.VarContext";
   TVM_DECLARE_FINAL_OBJECT_INFO(VarContextNode, Object);
 
+ private:
+  std::pair<PrimExpr, PrimExpr> SymbolicDiv(PrimExpr numer, PrimExpr denom, bool no_tighten_factor);
+
+ public:
   Array<SplitGroup> split_groups{};
   VarDefStack var_defs{};
 

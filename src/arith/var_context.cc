@@ -95,63 +95,55 @@ void VarDefStackNode::Append(const SizeVar& var, const PrimExpr& expr) {
   this->exprs.push_back(VarExprPair(var, expr));
 }
 
-SizeVar VarDefStackNode::FindOrAppend(const std::string& vname, const PrimExpr& expr) {
-  auto it = this->expr2idx.find(expr);
-  if (it != this->expr2idx.end()) {
-    return this->exprs[it->second]->var;
+PrimExpr VarDefStackNode::DefineConstShorthand(PrimExpr expr) {
+  if (ExprIsConstant(expr) && CountOps(expr) >= 10) {
+    std::string name = "v" + std::to_string(this->exprs.size());
+    expr = Analyzer().canonical_simplify(arith::SimplifyExpr(expr));
+    auto it = this->expr2idx.find(expr);
+    if (it == this->expr2idx.end()) {
+      expr = this->Append(name, expr);
+    } else {
+      expr = this->exprs[it->second]->var;
+    }
   }
-  return this->Append(vname, expr);
+  return expr;
 }
 
-VarDefStackNode VarDefStackNode::Prepend(const VarMapT& vmap) const {
-  VarDefStackNode ret;
-  for (auto& [vname, expr] : vmap) {
-    ret.Append(vname, expr);
-  }
-  for (auto& pair : this->exprs) {
-    ret.Append(pair->var->name_hint, pair->expr);
-  }
-  return ret;
-}
-
-VarMapT VarDefStackNode::IntoVarMap() const {
+VarMapT VarDefStackNode::IntoUnwindedVarMap() const {
   VarMapT vmap;
   for (const auto& pair : this->exprs) {
-    vmap.emplace(pair->var->name_hint, tir::SubstByName(pair->expr, vmap));
+    vmap.emplace(pair->var->name_hint, SubstByName(pair->expr, vmap));
   }
   return vmap;
 }
 
-std::vector<Var> VarDefStackNode::FreeVars() const {
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> vars;
-  auto CollectVars = [&vars](const ObjectRef& node) {
-    if (const VarNode* op = node.as<VarNode>()) {
-      vars.insert(GetRef<Var>(op));
-    }
-  };
-  for (const auto& pair : this->GetExprs()) {
-    tir::PostOrderVisit(pair->expr, CollectVars);
+std::unordered_set<std::string> VarDefStackNode::GetAllUsedVars(
+    std::optional<SizeVarKind> kind) const {
+  std::unordered_set<std::string> ret;
+  for (auto& pair : this->exprs) {
+    PostOrderVisit(pair->expr, [this, &ret, kind](const ObjectRef& node) {
+      if (auto* svnode = node.as<SizeVarNode>()) {
+        if (!kind || svnode->kind == kind) {
+          ret.insert(svnode->name_hint);
+        }
+      }
+    });
   }
-  for (const auto& pair : this->GetExprs()) {
-    vars.erase(pair->var);
-  }
-  return std::vector<Var>(vars.begin(), vars.end());
+  return ret;
 }
 
-bool VarDefStackNode::HasUndefVars(const PrimExpr& expr) const {
-  // SizeVar is seen as constant and doesn't count unless it has kOther type.
-  bool has_undef = false;
-  auto CheckUndef = [&has_undef, this](const ObjectRef& obj) {
-    if (auto* vnode = obj.as<VarNode>()) {
-      auto* svnode = obj.as<SizeVarNode>();
-      if (this->var2idx.count(vnode->name_hint) == 0 &&
-          (!svnode || svnode->kind == SizeVarKind::kOther)) {
-        has_undef = true;
-      }
-    }
-  };
-  tir::PostOrderVisit(expr, CheckUndef);
-  return has_undef;
+void VarDefStackNode::MapExprs(ExprMutator func) {
+  for (size_t i = 0; i < this->exprs.size(); i++) {
+    auto& pair = this->exprs[i];
+    this->exprs.Set(i, VarExprPair(pair->var, func(pair->expr)));
+  }
+}
+
+void VarDefStackNode::MapExprsParallel(ExprMutator func) {
+  support::parallel_for(0, this->exprs.size(), [this, &func](int i) {
+    auto& pair = this->exprs[i];
+    this->exprs.Set(i, VarExprPair(pair->var, func(pair->expr)));
+  });
 }
 
 inline std::pair<PrimExpr, PrimExpr> ConservativeDiv(PrimExpr extent, PrimExpr factor,
@@ -213,29 +205,13 @@ std::pair<PrimExpr, PrimExpr> VarContextNode::GetSplitSizes(const PrimExpr& exte
   return this->SymbolicDiv(extent, factor, no_tighten_factor);
 }
 
-void VarContextNode::DefineVar(const std::string& name, PrimExpr expr) {
-  this->var_defs->Append(name, expr);
-}
-
-PrimExpr VarContextNode::DefineConstShorthand(PrimExpr expr) {
-  if (!this->var_defs->HasUndefVars(expr) && CountOps(expr) >= 10) {
-    expr = this->AllocVarForExpr(arith::SimplifyExpr(expr));
-  }
-  return expr;
-}
-
-Var VarContextNode::AllocVarForExpr(PrimExpr expr) {
-  std::string name = "v" + std::to_string(this->var_defs->Size());
-  return this->var_defs->FindOrAppend(name, expr);
-}
-
 std::pair<PrimExpr, PrimExpr> VarContextNode::SymbolicDiv(PrimExpr numer, PrimExpr denom,
                                                           bool no_tighten_factor) {
   PrimExpr simpl = SimplifyExpr(numer / denom);
   if (!HasDiv(simpl)) {
     return {denom, simpl};
   }
-  for (auto &[extent, subst]: this->div_extents) {
+  for (auto& [extent, subst] : this->div_extents) {
     if (IsExprEquivalent(numer, extent)) {
       PrimExpr simpl = SimplifyExpr(subst / denom);
       if (!HasDiv(simpl)) {

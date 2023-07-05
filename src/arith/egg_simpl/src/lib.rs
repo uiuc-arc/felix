@@ -18,14 +18,14 @@ pub extern "C" fn simplify_expr(
     s_raw: *const c_char,
     n_iters: u64,
     n_nodes: u64,
-    simpl_rel: bool,
+    diff_approx: bool,
 ) -> *mut c_char {
     let s = str_from_ptr(s_raw);
     let simplified = lang::simplify(
         &s,
         n_iters.try_into().unwrap(),
         n_nodes.try_into().unwrap(),
-        simpl_rel,
+        diff_approx,
     );
     let c_str = CString::new(simplified).unwrap();
     c_str.into_raw()
@@ -49,7 +49,7 @@ pub extern "C" fn is_equivalent(
     explain: bool,
     n_iters: u64,
     n_nodes: u64,
-    simpl_rel: bool,
+    diff_approx: bool,
 ) -> bool {
     let lhs = str_from_ptr(lhs_raw);
     let rhs = str_from_ptr(rhs_raw);
@@ -59,7 +59,7 @@ pub extern "C" fn is_equivalent(
         explain,
         n_iters.try_into().unwrap(),
         n_nodes.try_into().unwrap(),
-        simpl_rel,
+        diff_approx,
     )
 }
 

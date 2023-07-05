@@ -86,6 +86,7 @@ define_language! {
         "!" = Not([Id; 1]),
         "select" = Select([Id; 3]),
         "sigmoid" = Sigmoid([Id; 1]),
+        "hump" = Hump([Id; 1]),
     }
 }
 
@@ -264,7 +265,7 @@ impl egg::Analysis<Math> for ConstantFold {
     }
 }
 
-fn is_const_with_pred(
+fn _is_const_with_pred(
     var: &str,
     fop: impl Fn(f64) -> bool,
 ) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
@@ -279,11 +280,29 @@ fn is_const_with_pred(
     }
 }
 
-fn is_geq_2(var: &str) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
-    is_const_with_pred(var, |x| x >= 2.0)
+fn is_not_zero(var: &str) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
+    let var = var.parse().unwrap();
+    move |egraph, _, subst| {
+        if let Some(n) = &egraph[subst[var]].data {
+            if let Const::Float(OrderedFloat(f)) = n.0 {
+                return f != 0.0;
+            }
+        }
+        true
+    }
 }
 
-fn is_pow_of_(egraph: &mut EGraph, subst: &Subst, x: Var, base: Var) -> Option<i64> {
+fn is_symbol(var: &str) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
+    let var = var.parse().unwrap();
+    move |egraph, _, subst| {
+        egraph[subst[var]]
+            .nodes
+            .iter()
+            .any(|n| matches!(n, Math::Symbol(..)))
+    }
+}
+
+fn _is_pow_of(egraph: &mut EGraph, subst: &Subst, x: Var, base: Var) -> Option<i64> {
     let (x, base) = (
         egraph[subst[x]].data.as_ref()?.0,
         egraph[subst[base]].data.as_ref()?.0,
@@ -302,10 +321,10 @@ fn is_pow_of_(egraph: &mut EGraph, subst: &Subst, x: Var, base: Var) -> Option<i
 
 fn is_pow_of(x: &str, base: &str) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
     let (x, base) = (x.parse().unwrap(), base.parse().unwrap());
-    move |egraph, _, subst| is_pow_of_(egraph, subst, x, base).is_some()
+    move |egraph, _, subst| _is_pow_of(egraph, subst, x, base).is_some()
 }
 
-pub static STABLE_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
+pub static BASIC_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
     vec![
         rewrite!("mul-comm";    "(* ?a ?b)"             => "(* ?b ?a)"),
         rewrite!("mul-assoc";   "(* ?a (* ?b ?c))"      => "(* (* ?a ?b) ?c)"),
@@ -318,7 +337,7 @@ pub static STABLE_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
         rewrite!("sub-intro";   "(+ ?a (* -1 ?b))"      => "(- ?a ?b)"),
         rewrite!("sub-cancel";  "(+ ?a (* -1 ?a))"      => "0"),
         rewrite!("div-canon";   "(/ ?a ?b)"             => "(* ?a (pow ?b -1))"),
-        rewrite!("div-intro";   "(* ?a (pow ?b -1))"    => "(/ ?a ?b)"),
+        rewrite!("div-intro";   "(* ?a (pow ?b -1))"    => "(/ ?a ?b)"  if is_not_zero("?b")),
         rewrite!("div-cancel";  "(* ?a (pow ?a -1))"    => "1"),
         rewrite!("add-mul-distrib";     "(* ?a (+ ?b ?c))"              => "(+ (* ?a ?b) (* ?a ?c))"),
         rewrite!("add-mul-factor";      "(+ (* ?a ?b) (* ?a ?c))"       => "(* ?a (+ ?b ?c))"),
@@ -327,12 +346,16 @@ pub static STABLE_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
         rewrite!("pow-pow";     "(pow (pow ?a ?b) ?c)"  => "(pow ?a (* ?b ?c))"),
         rewrite!("const-mul-pow";      "(* ?a (pow ?b ?c))"     => "(pow ?b (+ (logk ?b ?a) ?c))" if is_pow_of("?a", "?b")),
         rewrite!("const-div-pow";      "(/ ?a (pow ?b ?c))"     => "(pow ?b (- (logk ?b ?a) ?c))" if is_pow_of("?a", "?b")),
+        rewrite!("max-self";    "(max ?a ?a)"           => "?a"),
+        rewrite!("max-a-add-b"; "(max ?a (+ ?a ?b))"    => "(+ ?a ?b)"  if _is_const_with_pred("?b", |x| x >= 0.0)),
+        rewrite!("min-self";    "(max ?a ?a)"           => "?a"),
         rewrite!("min-pow";     "(min (pow ?a ?b) (pow ?a ?c))" => "(pow ?a (min ?b ?c))"),
-        rewrite!("logk-canon";  "(logk ?a ?b)"      => "(/ (log ?b) (log ?a))"),
-        rewrite!("log-prod";    "(log (* ?a ?b))"   => "(+ (log ?a) (log ?b))"),
-        rewrite!("log-pow";     "(log (pow ?a ?b))" => "(* ?b (log ?a))"),
-        rewrite!("floordiv-cancel"; "(// ?a ?a)"        => "1"),
+        rewrite!("logk-canon";  "(logk ?a ?b)"          => "(/ (log ?b) (log ?a))"),
+        rewrite!("log-prod";    "(log (* ?a ?b))"       => "(+ (log ?a) (log ?b))"),
+        rewrite!("log-pow";     "(log (pow ?a ?b))"     => "(* ?b (log ?a))"),
+        rewrite!("floordiv-cancel"; "(// (* ?a ?b) ?a)"     => "?b"),
         rewrite!("floordiv-merge";  "(// (// ?a ?b) ?c)"    => "(// (/ ?a ?b) ?c)"),
+        rewrite!("floordiv-neg-1";  "(// -1 ?a)"            => "-1"),
         rewrite!("select-same";     "(select ?a ?b ?b)"     => "?b"),
         rewrite!("select-true";     "(select true ?a ?b)"   => "?a"),
         rewrite!("select-false";    "(select false ?a ?b)"  => "?b"),
@@ -357,31 +380,56 @@ pub static STABLE_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
         rewrite!("gt-canon";    "(> ?a ?b)"     => "(< ?b ?a)"),
         rewrite!("le-canon";    "(<= ?a ?b)"    => "(! (< ?b ?a))"),
         rewrite!("eq-comm";     "(== ?a ?b)"    => "(== ?b ?a)"),
+        rewrite!("lt-min";      "(< ?a (min ?b ?c))"    => "(&& (< ?a ?b) (< ?a ?c))"),
+        rewrite!("eq-min";      "(== ?a (min ?b ?c))"   => "(|| (== ?a ?b) (== ?a ?c))"),
     ]
 });
 
-pub static ALL_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
+pub static DIFF_APPROX_RULES: Lazy<Vec<Rewrite>> = Lazy::new(|| {
     let mut ret_rules = vec![];
-    ret_rules.extend_from_slice(STABLE_RULES.as_slice());
+    ret_rules.extend_from_slice(BASIC_RULES.as_slice());
     ret_rules.extend(vec![
         // Differentiability-approx-specific simplification rules
-        rewrite!("lt-pow-1";    "(< (pow ?a ?b) ?c)"    => "(< ?b (logk ?a ?c))"    if is_geq_2("?a")),
-        rewrite!("lt-pow-2";    "(< ?c (pow ?a ?b))"    => "(< (logk ?a ?c) ?b)"    if is_geq_2("?a")),
-        rewrite!("lt-add-1";    "(< (+ ?a ?b) ?c)"      => "(< ?a (- ?c ?b))"),
-        rewrite!("lt-add-2";    "(< ?c (+ ?a ?b))"      => "(< (- ?c ?b) ?a)"),
-        rewrite!("lt-sub-1";    "(< (- ?a ?b) ?c)"      => "(< ?a (+ ?b ?c))"),
-        rewrite!("lt-sub-2";    "(< ?c (- ?a ?b))"      => "(< (+ ?b ?c) ?a)"),
-        rewrite!("lt-div-pow";  "(< ?a (/ ?b (pow ?c ?d)))"      => "(< (* ?a (pow ?c ?d)) ?b)"),
-        rewrite!("lt-mul-pow";  "(< ?a (* ?b (pow ?c ?d)))"      => "(< (/ ?a (pow ?c ?d)) ?b)"),
-        rewrite!("lt-min";      "(< ?a (min ?b ?c))"    => "(&& (< ?a ?b) (< ?a ?c))"),
-        rewrite!("eq-pow";      "(== (pow ?a ?b) ?c)"   => "(== ?b (logk ?a ?c))"   if is_geq_2("?a")),
-        rewrite!("eq-pow-0";    "(== (pow ?a ?b) 0)"    => "false"   if is_geq_2("?a")),
-        rewrite!("eq-sub";      "(== (- ?a ?b) ?c)"     => "(== ?a (+ ?b ?c))"),
-        rewrite!("eq-to-sub";   "(== ?a ?b)"            => "(== (- ?a ?b) 0)"),
-        rewrite!("eq-div";      "(== ?a (/ ?b ?c))"     => "(== (* ?a ?c) ?b)"),
+        rewrite!("1-lt-prod";   "(< 1 (* ?a ?b))"       => "(|| (< 1 ?a) (< 1 ?b))"),
+        rewrite!("lt-pow-1";    "(< (pow ?a ?b) ?c)"    => "(< ?b (logk ?a ?c))"    if _is_const_with_pred("?a", |x| x >= 2.0)),
+        rewrite!("lt-pow-2";    "(< ?c (pow ?a ?b))"    => "(< (logk ?a ?c) ?b)"    if _is_const_with_pred("?a", |x| x >= 2.0)),
+        rewrite!("eq-to-lt";    "(== 1 ?a)"             => "(! (< 1 ?a))"           if is_symbol("?a")),
+        rewrite!("1-eq-prod";   "(== 1 (* ?a ?b))"      => "(&& (== 1 ?a) (== 1 ?b))"),
+        rewrite!("neg-1-never-0";   "(== 0 (* -1 ?a))"  => "false"),
+        rewrite!("hump-0";      "(hump 0)"              => "1"),
+        rewrite!("hump-const";  "(hump ?a)"             => "0" if _is_const_with_pred("?a", |x| x != 0.0)),
     ]);
     ret_rules
 });
+
+pub struct DiffApproxSimplCostFn;
+impl egg::CostFunction<Math> for DiffApproxSimplCostFn {
+    type Cost = usize;
+    fn cost<C>(&mut self, enode: &Math, mut costs: C) -> Self::Cost
+    where
+        C: FnMut(Id) -> Self::Cost,
+    {
+        // Prefer the form (|| (< 1 ?a) (< 1 ?b)) over (< 1 (* a b)).
+        let op_cost = match enode {
+            // Thus all logical and lt / eq operators are cheap,
+            // and everything else is expensive.
+            Math::Const(..) => 1,
+            Math::Symbol(..) => 1,
+            Math::And(..) => 1,
+            Math::Or(..) => 1,
+            Math::Not(..) => 1,
+            Math::Lt(..) => 1,
+            // Prefer Lt over any other comparators
+            Math::Eq(..) => 5,
+            Math::Ne(..) => 5,
+            Math::Le(..) => 5,
+            Math::Gt(..) => 5,
+            Math::Ge(..) => 5,
+            _ => 10,
+        };
+        enode.fold(op_cost, |sum, i| sum + costs(i))
+    }
+}
 
 #[cfg(feature = "count")]
 pub static GLOBAL_RULE_COUNTER: Lazy<Mutex<HashMap<Symbol, usize>>> =
@@ -447,9 +495,9 @@ fn make_runner(
     explain: bool,
 ) -> (Runner, &'static Vec<Rewrite>) {
     let rules = if diff_approx {
-        &*ALL_RULES
+        &*DIFF_APPROX_RULES
     } else {
-        &*STABLE_RULES
+        &*BASIC_RULES
     };
     let mut runner = Runner::default()
         .with_iter_limit(n_iters)
@@ -465,7 +513,11 @@ pub fn simplify(expr: &str, n_iters: usize, n_nodes: usize, diff_approx: bool) -
     let (mut runner, rules) = make_runner(n_iters, n_nodes, diff_approx, cfg!(feature = "count"));
     runner = runner.with_expr(&expr).run(rules);
     let root = runner.roots[0];
-    let (_, best) = Extractor::new(&runner.egraph, AstSize).find_best(root);
+    let (_, best) = if diff_approx {
+        Extractor::new(&runner.egraph, DiffApproxSimplCostFn).find_best(root)
+    } else {
+        Extractor::new(&runner.egraph, AstSize).find_best(root)
+    };
     if cfg!(feature = "count") {
         add_rules_to_counter(&mut runner.explain_equivalence(&expr, &best));
     }

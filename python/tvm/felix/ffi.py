@@ -17,6 +17,23 @@ class VarContext(tvm.Object):
         return dict(_arith.VarContextGetVarDefs(self))
 
 
+@tvm._ffi.register_object("ansor.LinearExpr")
+class LinearExpr(tvm.Object):
+    lin_terms: Dict[tir.Var, float]
+    constant: float
+
+    def as_primexpr(self) -> tir.PrimExpr:
+        return _ansor.LinearExprAsPrimExpr(self)
+
+
+@tvm._ffi.register_object("ansor.FeaturePackPy")
+class FeaturePack(tvm.Object):
+    expressions: List[Tuple[str, tir.PrimExpr]]
+    free_vars: List[str]
+    linear_cons: List[LinearExpr]
+    var_decomp: Dict[str, Dict[int, tir.SizeVar]]
+
+
 # PrimExpr Utils
 
 
@@ -55,6 +72,28 @@ def generate_code_for_state(
 
 def print_state_tr_steps(state: StateObject) -> str:
     return "\n".join(_ansor.PrintTrStep(s) for s in state.transform_steps)
+
+
+def get_feature_pack(
+    code: tir.Stmt,
+    context: VarContext,
+    hw_params: ansor.HardwareParams,
+    sizes: Dict[str, int],
+    cache_line_size: int,
+    max_n_buf: int,
+    factorize: bool,
+    save_load_path: str,
+) -> FeaturePack:
+    return _ansor.GetFeaturePack(
+        code,
+        context,
+        hw_params,
+        sizes,
+        cache_line_size,
+        max_n_buf,
+        factorize,
+        save_load_path,
+    )
 
 
 def get_loop_bounds(code: tir.Stmt) -> List[Tuple[str, tir.PrimExpr]]:

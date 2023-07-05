@@ -372,8 +372,8 @@ PrimExpr indexdiv(PrimExpr a, PrimExpr b, Span span) { return floordiv(a, b, spa
 PrimExpr indexmod(PrimExpr a, PrimExpr b, Span span) { return floormod(a, b, span); }
 
 PrimExpr floordiv(PrimExpr a, PrimExpr b, Span span) {
-  ICHECK(a.dtype().is_int() || a.dtype().is_uint()) << a;
-  ICHECK(b.dtype().is_int() || b.dtype().is_uint()) << b;
+  // ICHECK(a.dtype().is_int() || a.dtype().is_uint()) << a;
+  // ICHECK(b.dtype().is_int() || b.dtype().is_uint()) << b;
   BinaryOpMatchTypes(a, b, span);
   PrimExpr ret = arith::TryConstFold<tir::FloorDiv>(a, b);
   if (ret.defined()) return ret;
@@ -381,8 +381,8 @@ PrimExpr floordiv(PrimExpr a, PrimExpr b, Span span) {
 }
 
 PrimExpr floormod(PrimExpr a, PrimExpr b, Span span) {
-  ICHECK(a.dtype().is_int() || a.dtype().is_uint()) << a;
-  ICHECK(b.dtype().is_int() || b.dtype().is_uint()) << b;
+  // ICHECK(a.dtype().is_int() || a.dtype().is_uint()) << a;
+  // ICHECK(b.dtype().is_int() || b.dtype().is_uint()) << b;
   BinaryOpMatchTypes(a, b, span);
   PrimExpr ret = arith::TryConstFold<tir::FloorMod>(a, b);
   if (ret.defined()) return ret;
@@ -612,8 +612,6 @@ TVM_REGISTER_GLOBAL("tir.bitwise_not").set_body_typed([](PrimExpr a, Span span) 
 
 // pow
 PrimExpr pow(PrimExpr x, PrimExpr y, Span span) {
-  BinaryOpMatchTypes(x, y, span);
-  ICHECK(x.dtype().is_float()) << "power only applies to float";
   static auto op = Op::Get("tir.pow");
   return tir::Call(x.dtype(), op, {x, y}, span);
 }
@@ -879,6 +877,8 @@ TIR_REGISTER_PURE_UNARY_OP("tir.atanh");
 
 TIR_REGISTER_PURE_UNARY_OP("tir.clz");
 
+TIR_REGISTER_PURE_UNARY_OP("tir.hump");
+
 // binary intrinsics
 TIR_REGISTER_PURE_BINARY_OP("tir.atan2");
 
@@ -889,6 +889,8 @@ TIR_REGISTER_PURE_BINARY_OP("tir.hypot");
 TIR_REGISTER_PURE_BINARY_OP("tir.copysign");
 
 TIR_REGISTER_PURE_BINARY_OP("tir.ldexp");
+
+TIR_REGISTER_PURE_BINARY_OP("tir.logk");
 
 // expose basic functions to node namespace
 TVM_REGISTER_GLOBAL("node._const").set_body([](TVMArgs args, TVMRetValue* ret) {

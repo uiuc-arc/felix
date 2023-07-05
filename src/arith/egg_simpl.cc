@@ -293,6 +293,8 @@ std::pair<PrimExpr, size_t> ParseExprPreorder(const std::string& str,
     return {MakeUnOp(op_str, exp, args), loc};
   } else if (op_str == "sigmoid") {
     return {MakeUnOp(op_str, sigmoid, args), loc};
+  } else if (op_str == "hump") {
+    return {MakeUnOp(op_str, hump, args), loc};
   } else {
     throw std::runtime_error("Unknown operator " + op_str + " in " + str);
   }
@@ -313,20 +315,15 @@ PrimExpr SimplifyExpr(const PrimExpr& expr, size_t max_n_iters, size_t max_n_nod
   char* simpl_str = simplify_expr(expr_str.c_str(), max_n_iters, max_n_nodes, diff_approx);
   PrimExpr simplified = ParseExprPreorder(simpl_str, printer.var_map).first;
   free_str(simpl_str);
-  // If not really simplified, don't return the simplified version
-  // because the order of the variables etc. may be different.
-  return CountOps(simplified) < CountOps(expr) ? simplified : expr;
+  return simplified;
 }
 
 PrimExpr SubAndSimplify(const PrimExpr& expr,
-                        const std::unordered_map<std::string, PrimExpr>& subst,
-                        bool simpl_only_on_change, size_t max_n_iters, size_t max_n_nodes) {
+                        const std::unordered_map<std::string, PrimExpr>& subst, size_t max_n_iters,
+                        size_t max_n_nodes) {
   bool changed = false;
   auto expr_ = SubstByName(expr, subst, &changed);
-  if (!changed && simpl_only_on_change) {
-    return expr;
-  }
-  return SimplifyExpr(expr_, max_n_iters, max_n_nodes, true);
+  return changed ? SimplifyExpr(expr_, max_n_iters, max_n_nodes, true) : expr;
 }
 
 bool IsExprEquivalent(const PrimExpr& lhs, const PrimExpr& rhs, size_t max_n_iters,

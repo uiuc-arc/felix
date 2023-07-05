@@ -1,14 +1,17 @@
 import logging
 from pathlib import Path
+from typing import Dict
 
 from tvm.auto_scheduler.loop_state import StateObject
 from tvm.tir import Stmt
 
 from . import ffi
+from .features import TorchFeatures
+from .utils import HW_PARAMS
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Sketch"]
-CACHE_PATH = (Path(__file__).parent / "../../lightning_logs/features").resolve()
+FEATURE_CACHE_PATH = Path(Path("~").expanduser(), ".tvm", "felix", "features")
 
 
 class Sketch:
@@ -39,7 +42,28 @@ class Sketch:
         return ffi.generate_code_for_state(task, state, False)[0]
 
     def save_path(self) -> Path:
-        return CACHE_PATH / f"{self.state_hash()}.json"
+        return FEATURE_CACHE_PATH / f"{self.state_hash()}.json"
+
+    def fetch_features(
+        self,
+        sizes: Dict[str, int],
+        prime_factorize: bool = True,
+        max_n_buf: int = 5,
+        cache_line_size: int = 64,
+    ):
+        path = self.save_path()
+        path.parent.mkdir(exist_ok=True, parents=True)
+        features = ffi.get_feature_pack(
+            self.code,
+            self.context,
+            HW_PARAMS,
+            sizes,
+            cache_line_size,
+            max_n_buf,
+            prime_factorize,
+            path.as_posix(),
+        )
+        return TorchFeatures.from_feat_pack(features)
 
     def __str__(self) -> str:
         return f"Sketch({self.backbone} from {self.parent_task})"

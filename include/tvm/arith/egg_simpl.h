@@ -22,8 +22,7 @@ PrimExpr SimplifyExpr(const PrimExpr& expr, size_t max_n_iters = 30, size_t max_
 
 PrimExpr SubAndSimplify(const PrimExpr& expr,
                         const std::unordered_map<std::string, PrimExpr>& subst,
-                        bool simpl_only_on_change, size_t max_n_iters = 30,
-                        size_t max_n_nodes = 10000);
+                        size_t max_n_iters = 30, size_t max_n_nodes = 10000);
 
 bool IsExprEquivalent(const PrimExpr& lhs, const PrimExpr& rhs, size_t max_n_iters = 30,
                       size_t max_n_nodes = 10000, bool diff_approx = false);

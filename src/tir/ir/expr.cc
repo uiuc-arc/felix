@@ -31,34 +31,30 @@
 namespace tvm {
 namespace tir {
 
-#define TVM_DEFINE_BINOP_CONSTRUCTOR(Name)                                                   \
-  Name::Name(PrimExpr a, PrimExpr b, Span span) {                                            \
-    using T = Name::ContainerType;                                                           \
-    ICHECK(a.defined()) << "ValueError: a is undefined\n";                                   \
-    ICHECK(b.defined()) << "ValueError: b is undefined\n";                                   \
-    CHECK(a.dtype() == b.dtype()) << "TypeError: mismatched types. " << a.dtype() << " vs. " \
-                                  << b.dtype() << "\n";                                      \
-    ObjectPtr<T> node = make_object<T>();                                                    \
-    node->dtype = a.dtype();                                                                 \
-    node->a = std::move(a);                                                                  \
-    node->b = std::move(b);                                                                  \
-    node->span = std::move(span);                                                            \
-    data_ = std::move(node);                                                                 \
+#define TVM_DEFINE_BINOP_CONSTRUCTOR(Name)                 \
+  Name::Name(PrimExpr a, PrimExpr b, Span span) {          \
+    using T = Name::ContainerType;                         \
+    ICHECK(a.defined()) << "ValueError: a is undefined\n"; \
+    ICHECK(b.defined()) << "ValueError: b is undefined\n"; \
+    ObjectPtr<T> node = make_object<T>();                  \
+    node->dtype = a.dtype();                               \
+    node->a = std::move(a);                                \
+    node->b = std::move(b);                                \
+    node->span = std::move(span);                          \
+    data_ = std::move(node);                               \
   }
 
-#define TVM_DEFINE_CMPOP_CONSTRUCTOR(Name)                                                   \
-  Name::Name(PrimExpr a, PrimExpr b, Span span) {                                            \
-    using T = Name::ContainerType;                                                           \
-    ICHECK(a.defined()) << "ValueError: a is undefined\n";                                   \
-    ICHECK(b.defined()) << "ValueError: b is undefined\n";                                   \
-    CHECK(a.dtype() == b.dtype()) << "TypeError: mismatched types. " << a.dtype() << " vs. " \
-                                  << b.dtype() << "\n";                                      \
-    ObjectPtr<T> node = make_object<T>();                                                    \
-    node->dtype = DataType::Bool(a.dtype().lanes());                                         \
-    node->a = std::move(a);                                                                  \
-    node->b = std::move(b);                                                                  \
-    node->span = std::move(span);                                                            \
-    data_ = std::move(node);                                                                 \
+#define TVM_DEFINE_CMPOP_CONSTRUCTOR(Name)                 \
+  Name::Name(PrimExpr a, PrimExpr b, Span span) {          \
+    using T = Name::ContainerType;                         \
+    ICHECK(a.defined()) << "ValueError: a is undefined\n"; \
+    ICHECK(b.defined()) << "ValueError: b is undefined\n"; \
+    ObjectPtr<T> node = make_object<T>();                  \
+    node->dtype = DataType::Bool(a.dtype().lanes());       \
+    node->a = std::move(a);                                \
+    node->b = std::move(b);                                \
+    node->span = std::move(span);                          \
+    data_ = std::move(node);                               \
   }
 
 // Var
@@ -610,7 +606,6 @@ Select::Select(PrimExpr condition, PrimExpr true_value, PrimExpr false_value, Sp
   ICHECK(false_value.defined()) << "ValueError: true_value is undefined";
   ICHECK(condition.dtype().is_bool());
   ICHECK(condition.dtype().lanes() == true_value.dtype().lanes() || condition.dtype().lanes() == 1);
-  ICHECK(false_value.dtype() == true_value.dtype()) << "TypeError: mismatched types";
 
   ObjectPtr<SelectNode> node = make_object<SelectNode>();
   node->dtype = true_value.dtype();
