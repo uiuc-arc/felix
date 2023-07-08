@@ -13,7 +13,7 @@ namespace tvm {
 namespace felix {
 using namespace tvm::arith;
 
-std::unordered_map<uint64_t, uint64_t> Factorize(uint64_t n) {
+auto Factorize(uint64_t n) {
   std::unordered_map<uint64_t, uint64_t> factors;
   for (uint64_t i = 2; i <= n; ++i) {
     while (n % i == 0) {
@@ -21,7 +21,11 @@ std::unordered_map<uint64_t, uint64_t> Factorize(uint64_t n) {
       n /= i;
     }
   }
-  return factors;
+  std::unordered_map<uint64_t, PrimExpr> ret;
+  for (auto& [factor, count] : factors) {
+    ret[factor] = Integer(count);
+  }
+  return ret;
 }
 
 template <typename T>
@@ -50,9 +54,6 @@ std::vector<PrimExpr> CollectSameOps(const PrimExpr& e) {
   }
   return ret;
 }
-
-// size_t is not (de)serializable, so we use uint64_t instead
-using DecompT = std::unordered_map<std::string, std::unordered_map<uint64_t, SizeVar>>;
 
 class LinearExprNode : public Object {
  public:
@@ -431,13 +432,13 @@ class FeaturePackPyNode : public Object {
   Array<Array<ObjectRef>> expressions;
   Array<String> free_vars;
   Array<LinearExpr> linear_cons;
-  Map<String, Map<Integer, SizeVar>> var_decomp;
+  Map<String, Map<Integer, SizeVar>> var_factors;
 
   void VisitAttrs(AttrVisitor* v) {
     v->Visit("expressions", &expressions);
     v->Visit("free_vars", &free_vars);
     v->Visit("linear_cons", &linear_cons);
-    v->Visit("var_decomp", &var_decomp);
+    v->Visit("var_factors", &var_factors);
   }
 
   static constexpr const char* _type_key = "ansor.FeaturePackPy";
@@ -487,44 +488,50 @@ class FeaturePack {
       }
       return expr_;
     });
-  }
-
-  void RunExpTransform(const std::vector<size_t>& prime_bases) {
     // Concat `features` to the end of `vdefs` to form `vi_and_features`,
     // and split out E{i} variables from vdefs into `ei_vars`, the rest into `vi_vars`.
-    VarDefStack& vi_and_features = this->variables["vi_and_features"];
-    {
-      VarDefStack &vi_vars = this->variables["vi_vars"], &ei_vars = this->variables["ei_vars"];
-      for (auto& pair : this->variables.at("vdefs")->GetExprs()) {
-        if (pair->var->kind == SizeVarKind::kShapeVar) {
-          ei_vars->Append(pair->var, pair->expr);
-        } else {
-          vi_vars->Append(pair->var, pair->expr);
-          vi_and_features->Append(pair->var, pair->expr);
-        }
-      }
-      for (auto& pair : this->variables.at("features")->GetExprs()) {
+    VarDefStack &vi_and_features = this->variables["vi_and_features"],
+                &vi_vars = this->variables["vi_vars"], &ei_vars = this->variables["ei_vars"];
+    for (auto& pair : this->variables.at("vdefs")->GetExprs()) {
+      if (pair->var->kind == SizeVarKind::kShapeVar) {
+        ei_vars->Append(pair->var, pair->expr);
+      } else {
+        vi_vars->Append(pair->var, pair->expr);
         vi_and_features->Append(pair->var, pair->expr);
       }
-      this->variables.erase("vdefs");
-      this->variables.erase("features");
     }
+    for (auto& pair : this->variables.at("features")->GetExprs()) {
+      vi_and_features->Append(pair->var, pair->expr);
+    }
+    this->variables.erase("vdefs");
+    this->variables.erase("features");
+  }
+
+  void RunExpDecomposeNoFactoring() {
+    // If no prime factoring is requested, still do all of the work but with prime_bases = {2},
+    // because we do need all the variables to be at least defined.
+    this->no_factoring = true;
+    this->RunExpDecompose({2});
+  }
+
+  void RunExpDecompose(const std::vector<size_t>& prime_bases) {
     // List all schedule vars (such as sp_i_j), and create exp decomposition for them,
-    // inserting into this->var_decomp and `exp_decomp`.
-    auto& exp_decomp = this->variables["exp_decomp"];
+    // inserting into this->var_factors and `exp_decomp`.
+    VarDefStack &exp_decomp = this->variables["exp_decomp"],
+                &vi_and_features = this->variables.at("vi_and_features");
     auto all_var_names = vi_and_features->GetAllUsedVars(SizeVarKind::kScheduleKnob);
+    // 1. For variables in `SplitGroup`s, we create a new variable for each prime base p.
     auto DecomposeOneVar = [this, &prime_bases](const std::string& vname, SizeVarKind kind) {
       PrimExpr subst_expr = Integer(1);
       for (size_t prime : prime_bases) {
         SizeVar var(vname + "_" + std::to_string(prime), kind);
-        this->var_decomp[vname][prime] = var;
+        this->var_factors[vname][prime] = var;
         // Added variable should be greater than 0 (i.e., -sv <= 0).
         this->linear_cons.push_back(LinearExpr(var) * (-1));
         subst_expr *= pow(Integer(prime), var);
       }
       return subst_expr;
     };
-    // 1. For variables in `SplitGroup`s, we create a new variable for each prime base p:
     for (auto& group : this->split_groups) {
       auto extent_vname = group->extent->name_hint;
       // Create sp_i_j_2, sp_i_j_3, ... for each sp_i_j and prime base p.
@@ -540,9 +547,9 @@ class FeaturePack {
       // (essentially meaning that each power consisting q{i} is non-negative)
       auto quotient = Integer(1);
       for (size_t prime : prime_bases) {
-        LinearExpr q_total_power(this->var_decomp[extent_vname][prime]);
+        LinearExpr q_total_power(this->var_factors[extent_vname][prime]);
         for (auto& vname : group->vars) {
-          q_total_power -= LinearExpr(this->var_decomp[vname][prime]);
+          q_total_power -= LinearExpr(this->var_factors[vname][prime]);
         }
         // NOTE: it's -q_total_power because we want something lower-better.
         this->linear_cons.push_back(q_total_power * (-1));
@@ -550,10 +557,10 @@ class FeaturePack {
       }
       exp_decomp->Append(group->quotient, quotient);
     }
-    // 2. For all other variables, just do a log2.
+    // For all other variables, just do a log2, and don't put it in this->var_factors.
     for (auto& vname : all_var_names) {
       SizeVar sv(vname + "_2", SizeVarKind::kScheduleKnob);
-      this->var_decomp[vname][2] = sv;
+      this->var_factors[vname][2] = sv;
       exp_decomp->Append(vname, pow(Integer(2), sv));
       // Added variable should be greater than 0 (i.e., -sv <= 0)
       this->linear_cons.push_back(LinearExpr(sv) * (-1));
@@ -562,7 +569,7 @@ class FeaturePack {
     }
   }
 
-  void RunDiffTransform(size_t n_threads) {
+  void RunDiffTransform() {
     // Remove floordiv and floormod from all variables except Ei variables.
     for (auto& [table_name, vdefs] : this->variables) {
       if (table_name != "ei_vars") {
@@ -622,8 +629,8 @@ class FeaturePack {
   void RunSizeSubstitution(const Map<String, Integer>& size_subst) {
     VarMapT size_subst_(size_subst.begin(), size_subst.end());
     // 1. Set up size_subst_ with the values of all Ei and Ei_b variables.
-    //    * size_subst_ values are all integers, but for the ease of use with SubAndSimplify,
-    //      we store more general `PrimExpr`s instead.
+    //    * size_subst_ values are all integers when this->no_factoring is false,
+    //      and can be floats (results of log2(x)) otherwise.
     for (auto& pair : this->variables.at("ei_vars")->GetExprs()) {
       auto& vname = pair->var->name_hint;
       auto expr = SubAndSimplify(pair->expr, size_subst_);
@@ -631,42 +638,18 @@ class FeaturePack {
       ICHECK(expr_int) << "All shape variables must be substituted to integers; got " << pair->var
                        << " = " << expr;
       size_subst_[vname] = expr;
-      std::unordered_map<uint64_t, uint64_t> factors = Factorize(expr_int->value);
-      auto& shape_var_decomp = this->var_decomp.at(vname);
-      for (auto& [prime, power] : factors) {
-        auto it = shape_var_decomp.find(prime);
-        ICHECK(it != shape_var_decomp.end())
-            << "Shape variable " << vname << " = " << expr_int->value << " contains factor "
-            << prime << " that the features weren't factorized for.";
-        size_subst_[it->second->name_hint] = Integer(power);
+      std::unordered_map<uint64_t, PrimExpr> factors;
+      if (this->no_factoring) {
+        factors[2] = ToFloatImm(std::log2(expr_int->value));
+      } else {
+        factors = Factorize(expr_int->value);
       }
-      for (auto& [k, v] : shape_var_decomp) {
-        if (!size_subst_.count(v->name_hint)) {
-          size_subst_[v->name_hint] = Integer(0);
-        }
-      }
+      this->InsertShapeVarFactors(vname, factors, size_subst_);
     }
     // 2. Some (many) knobs can become trivial during size concretization; add all that is 0 to
     // size_subst_ as well.
-    for (auto& group : this->split_groups) {
-      auto& ename = group->extent->name_hint;
-      for (auto& vname : group->vars) {
-        auto& inner_map = this->var_decomp.at(vname);
-        for (auto it = inner_map.begin(); it != inner_map.end();) {
-          auto& [prime, decomp_var] = *it;
-          auto e_prime_name = ename + "_" + std::to_string(prime);
-          auto* extent_prime_power = size_subst_.at(e_prime_name).as<IntImmNode>();
-          ICHECK(extent_prime_power);
-          // If for example E2_3 is 0 (meaning E2 is not divisible by 3),
-          // we can set sp_2_i_3 to 0 for all i.
-          if (extent_prime_power->value == 0) {
-            size_subst_[decomp_var->name_hint] = Integer(0);
-            it = inner_map.erase(it);
-          } else {
-            ++it;
-          }
-        }
-      }
+    if (!this->no_factoring) {
+      this->ComputeSplitGroupsFactors(size_subst_);
     }
     // 3. Concatenate all variables into one VarDefStack and substitute all sizes.
     VarDefStack concated;
@@ -678,7 +661,10 @@ class FeaturePack {
       }
     }
     concated->MapExprsParallel([this, &size_subst_](const PrimExpr& expr) {
-      return SubAndSimplify(expr, size_subst_, true);
+      auto ret = SubAndSimplify(expr, size_subst_, true);
+      ICHECK(CheckNoShapeVars(ret)) << "Expression " << expr << " substituted to " << ret
+                                    << " still contains shape variables.";
+      return ret;
     });
     this->variables.clear();
     this->variables["vdefs"] = concated;
@@ -707,7 +693,7 @@ class FeaturePack {
     }
     node->linear_cons = this->linear_cons;
     std::unordered_set<std::string> free_vars;
-    for (auto& [k1, vs] : this->var_decomp) {
+    for (auto& [k1, vs] : this->var_factors) {
       Map<Integer, SizeVar> m;
       for (auto& [k2, v] : vs) {
         if (v->kind == SizeVarKind::kScheduleKnob) {
@@ -715,7 +701,7 @@ class FeaturePack {
         }
         m.Set(k2, v);
       }
-      node->var_decomp.Set(k1, m);
+      node->var_factors.Set(k1, m);
     }
     for (auto& vname : free_vars) {
       node->free_vars.push_back(vname);
@@ -739,7 +725,9 @@ class FeaturePack {
     ICHECK(reader.NextArrayItem());
     reader.Read(&fp.split_groups);
     ICHECK(reader.NextArrayItem());
-    reader.Read(&fp.var_decomp);
+    reader.Read(&fp.var_factors);
+    ICHECK(reader.NextArrayItem());
+    reader.Read(&fp.no_factoring);
     ICHECK(!reader.NextArrayItem());
     return fp;
   }
@@ -753,15 +741,69 @@ class FeaturePack {
       writer.WriteArrayItem(fp->variables);
       writer.WriteArrayItem(fp->linear_cons);
       writer.WriteArrayItem(fp->split_groups);
-      writer.WriteArrayItem(fp->var_decomp);
+      writer.WriteArrayItem(fp->var_factors);
+      writer.WriteArrayItem(fp->no_factoring);
     }
     writer.EndArray();
+  }
+
+  void InsertShapeVarFactors(const std::string& vname,
+                             const std::unordered_map<uint64_t, PrimExpr>& factors,
+                             VarMapT& size_subst) const {
+    auto& shape_var_decomp = this->var_factors.at(vname);
+    for (auto& [prime, power] : factors) {
+      auto it = shape_var_decomp.find(prime);
+      ICHECK(it != shape_var_decomp.end()) << "Shape variable " << vname << " contains factor "
+                                           << prime << " that the features weren't factorized for.";
+      size_subst[it->second->name_hint] = power;
+    }
+    for (auto& [k, v] : shape_var_decomp) {
+      if (!size_subst.count(v->name_hint)) {
+        size_subst[v->name_hint] = Integer(0);
+      }
+    }
+  }
+
+  void ComputeSplitGroupsFactors(VarMapT& size_subst) {
+    for (auto& group : this->split_groups) {
+      auto& ename = group->extent->name_hint;
+      for (auto& vname : group->vars) {
+        auto& inner_map = this->var_factors.at(vname);
+        for (auto it = inner_map.begin(); it != inner_map.end();) {
+          auto& [prime, decomp_var] = *it;
+          auto e_prime_name = ename + "_" + std::to_string(prime);
+          auto* extent_prime_power = size_subst.at(e_prime_name).as<IntImmNode>();
+          ICHECK(extent_prime_power);
+          // If for example E2_3 is 0 (meaning E2 is not divisible by 3),
+          // we can set sp_2_i_3 to 0 for all i.
+          if (extent_prime_power->value == 0) {
+            size_subst[decomp_var->name_hint] = Integer(0);
+            it = inner_map.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+    }
+  }
+
+  bool CheckNoShapeVars(const PrimExpr& expr) {
+    bool no_shape_vars{true};
+    PostOrderVisit(expr, [&no_shape_vars](const ObjectRef& node) {
+      auto* op = node.as<SizeVarNode>();
+      if (op && op->kind == SizeVarKind::kShapeVar) {
+        no_shape_vars = false;
+      }
+    });
+    return no_shape_vars;
   }
 
   std::unordered_map<std::string, VarDefStack> variables;
   std::vector<LinearExpr> linear_cons{};
   Array<SplitGroup> split_groups;
-  DecompT var_decomp{};
+  // size_t is not (de)serializable, so we use uint64_t instead
+  std::unordered_map<std::string, std::unordered_map<uint64_t, SizeVar>> var_factors{};
+  bool no_factoring{false};
 };
 
 class StmtSimplifier : public StmtExprMutator {
@@ -884,17 +926,10 @@ class StmtSimplifier : public StmtExprMutator {
   std::unordered_map<PrimExpr, PrimExpr, StructuralHash, StructuralEqual> _memo;
 };
 
-void GatherVars(const PrimExpr& expr, std::unordered_set<const VarNode*>* vars) {
-  PostOrderVisit(expr, [&vars](const ObjectRef& node) {
-    if (const VarNode* op = node.as<VarNode>()) {
-      vars->insert(op);
-    }
-  });
-}
-
-std::optional<FeaturePack> GetFeaturePack(Stmt stmt, VarContext context,
+std::optional<FeaturePack> GetFeaturePack(Stmt& stmt, VarContext& context,
                                           const auto_scheduler::HardwareParams& hw_params,
-                                          size_t cache_line_size, size_t max_n_bufs) {
+                                          bool factoring, size_t cache_line_size,
+                                          size_t max_n_bufs) {
   auto st_vdefs = context->var_defs;
   FeaturePack fp;
   try {
@@ -921,15 +956,20 @@ std::optional<FeaturePack> GetFeaturePack(Stmt stmt, VarContext context,
   }
   // Simplify features that just came out from feature extraction
   fp.RunRollingSimplify();
-  fp.RunExpTransform({2, 3, 5, 7});
-  fp.RunDiffTransform(1);
+  if (factoring) {
+    fp.RunExpDecompose({2, 3, 5, 7});
+  } else {
+    fp.RunExpDecomposeNoFactoring();
+  }
+  fp.RunDiffTransform();
   return fp;
 }
 
 TVM_REGISTER_GLOBAL("auto_scheduler.GetFeaturePack")
     .set_body_typed([](Stmt stmt, VarContext context, auto_scheduler::HardwareParams hw_params,
                        Map<String, Integer> sizes, size_t cache_line_size, size_t max_n_bufs,
-                       bool factorize, String save_load_path) {
+                       bool factoring, String save_load_prefix) {
+      std::string save_load_path = save_load_prefix + (factoring ? ".json" : "_nofactor.json");
       std::ifstream fin(save_load_path);
       FeaturePack fp;
       if (fin.is_open()) {
@@ -942,7 +982,8 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetFeaturePack")
         fp = fp_opt.value();
       } else {
         LOG_INFO << "Extracting features to save to " << save_load_path;
-        auto fp_opt = GetFeaturePack(stmt, context, hw_params, cache_line_size, max_n_bufs);
+        auto fp_opt =
+            GetFeaturePack(stmt, context, hw_params, factoring, cache_line_size, max_n_bufs);
         if (fp_opt) {
           fp = fp_opt.value();
           FeaturePack::SaveAsJson(save_load_path, fp);
@@ -952,7 +993,6 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetFeaturePack")
         }
       }
       fp.RunSizeSubstitution(sizes);
-      FeaturePack::SaveAsJson(save_load_path + ".json", fp);
       return fp.IntoPythonFeaturePack();
     });
 

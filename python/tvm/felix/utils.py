@@ -2,7 +2,7 @@ import logging
 import typing as ty
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import onnx
@@ -15,18 +15,10 @@ from tvm import relay
 from tvm.auto_scheduler.loop_state import StateObject
 from tvm.relay.backend.executor_factory import GraphExecutorFactoryModule
 
+from . import ffi
+
 logger = logging.getLogger(__file__)
-__all__ = [
-    "benchmark_tvm",
-    "transpose2",
-    "transpose3",
-    "coalesce_dicts",
-    "parse_task",
-    "parse_task_name",
-    "TARGET",
-    "HW_PARAMS",
-    "MEASURER",
-]
+__all__ = ["TARGET", "HW_PARAMS", "MEASURER"]
 
 TARGET = tvm.target.cuda(model="a5000", arch="sm_80")
 HW_PARAMS = ansor.HardwareParams(
@@ -43,6 +35,9 @@ MEASURER = ansor.LocalRunner()
 
 PathLike = ty.Union[Path, str]
 InputSpec = Union[torch.Tensor, List[torch.Tensor]]
+AnsorTaskWeight = Tuple[ansor.SearchTask, int]
+InpResPair = Tuple[ansor.MeasureInput, ansor.MeasureResult]
+LoadedConf = Dict[str, Any]
 
 
 @dataclass
@@ -190,6 +185,80 @@ def get_cuda_code(task: ansor.SearchTask, state: StateObject):
     return func.imported_modules[0].get_source()
 
 
+def load_tuned_configs(tasks: List[AnsorTaskWeight], config_files: Sequence[PathLike]):
+    from tvm.auto_scheduler import RecordReader
+
+    configs_slots: Dict[str, Tuple[ansor.SearchTask, List[InpResPair]]] = {
+        task.workload_key: (task, []) for task, _ in tasks
+    }
+    unknown_keys = set()
+    for file in config_files:
+        for inp, res in RecordReader(str(file)):
+            if res.error_no != 0:
+                continue
+            key = inp.task.workload_key
+            if (got := configs_slots.get(key)) is not None:
+                _, slot = got
+                slot.append((inp, res))
+            else:
+                unknown_keys.add(key)
+    if unknown_keys:
+        logger.warning("Got unknown keys in configs: %s", unknown_keys)
+    ret: List[List[LoadedConf]] = []
+    for task, slots in configs_slots.values():
+        if not slots:
+            ret.append([])
+            continue
+        assert all(result.error_no == 0 for _, result in slots)
+        flops = task.compute_dag.flop_ct
+        configs = [c | {"flops": flops} for c in process_inp_res_pairs(slots)]
+        ret.append(configs)
+    assert len(ret) == len(tasks)
+    return ret
+
+
+def process_inp_res_pairs(
+    inp_res: List[InpResPair], ansor_features: bool = True
+) -> List[LoadedConf]:
+    from tvm.auto_scheduler.feature import (
+        get_per_store_features_from_measure_pairs as get_feats,
+    )
+
+    inputs, results = transpose2(inp_res)
+    if ansor_features:
+        features, norm_throughputs, _ = get_feats(inputs, results)
+    else:
+        features = norm_throughputs = []
+    configs = []
+    for i in range(len(inputs)):
+        costs = results[i].costs
+        # mean_cost is FloatImm type before conversion
+        mean_cost = float(sum(costs) / len(costs))
+        state = inputs[i].state
+        config = {
+            "state": state,
+            "backbone": ffi.extract_backbone(state),
+            "var_values": ffi.extract_config_dict(state),
+            "time": mean_cost,
+        }
+        if ansor_features:
+            config["features"] = features[i].astype(float)
+            config["throughput"] = norm_throughputs[i]
+        configs.append(config)
+    return configs
+
+
+def group_configs_by_backbone(
+    configs: List[LoadedConf],
+) -> Dict[tuple, List[LoadedConf]]:
+    from collections import defaultdict
+
+    ret = defaultdict(list)
+    for conf in configs:
+        ret[conf["backbone"]].append(conf)
+    return ret
+
+
 T1 = ty.TypeVar("T1")
 T2 = ty.TypeVar("T2")
 T3 = ty.TypeVar("T3")
@@ -224,11 +293,6 @@ def parse_task(task: ansor.SearchTask, keep_all_inputs: bool = True):
     task_desc, n_args = _parse_tvm_func_name(task.desc)
     shapes = shapes[:-1] if keep_all_inputs else shapes[:n_args]
     return task_desc, shapes
-
-
-def parse_task_name(task_desc: str):
-    task_desc_, _ = _parse_tvm_func_name(task_desc)
-    return short_print_names(task_desc_)
 
 
 def short_print_names(types_indices: List[Tuple[str, int]]):

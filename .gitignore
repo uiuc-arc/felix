@@ -248,3 +248,5 @@ _docs/
 jvm/target
 .config/configstore/
 .ci-py-scripts/
+
+lightning_logs/

@@ -18,6 +18,7 @@ from .sym_dag import RelayOpBuilder, SymbolicDAG
 _logger = logging.getLogger(__name__)
 __all__ = [
     "SymTask",
+    "TaskInstance",
     "SymTaskAndInstances",
     "batch_create_tasks",
     "extract_tasks",
@@ -25,7 +26,6 @@ __all__ = [
     "load_and_register_tasks",
     "load_and_register_tasks_",
 ]
-AnsorTaskWeight = Tuple[ansor.SearchTask, int]
 
 
 class TaskInstance(NamedTuple):
@@ -107,7 +107,7 @@ class SymTask:
 
 
 def batch_create_tasks(
-    tasks: List[AnsorTaskWeight],
+    tasks: List[utils.AnsorTaskWeight],
     hash_match: bool = True,
     print_tasks: bool = True,
     progress: bool = True,

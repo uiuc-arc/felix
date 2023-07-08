@@ -903,7 +903,7 @@ class FixedSizePool(RelayComputeOpBuilder, abc.ABC):
             lhs, rhs = index.a, index.b
             if isinstance(lhs, tir.Mul) and isinstance(lhs.b, tir.IntImm):
                 stride, reduce_var = lhs.b, rhs
-            elif isinstance(lhs, tir.SizeVar):
+            elif isinstance(lhs, tir.Var):
                 stride, reduce_var = tir_int(1), rhs
             else:
                 raise ValueError(f"Unsupported pooling index {index}")

@@ -98,3 +98,10 @@ def get_feature_pack(
 
 def get_loop_bounds(code: tir.Stmt) -> List[Tuple[str, tir.PrimExpr]]:
     return list(_ansor.GetLoopBounds(code))
+
+
+# Additional Felix utils to interface with Ansor data structures
+
+
+def extract_config_dict(state: StateObject) -> Dict[str, int]:
+    return {str(k): int(v) for k, v in _ansor.ExtractConfigDict(state.transform_steps).items()}

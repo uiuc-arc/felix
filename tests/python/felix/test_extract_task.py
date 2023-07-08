@@ -96,7 +96,7 @@ class SketchCodeRef:
 TASK_SKETCHES: Dict[str, List[Union[SketchCodeDesc, SketchCodeRef]]] = {
     "Const,Max2DPool[Padded]": [
         SketchCodeDesc(
-            ("FU", "SP", "AN", "AN", "PR"),
+            ("CI", "FU", "SP", "AN", "AN", "PR"),
             {
                 "v0": "(+ N:s (* N:s (// (+ In0:s (- (* PadH:s 2) KSize0:s)) StrideH:s)))",
                 "v1": "(+ v0:v (* v0:v (// (+ In1:s (- (* PadW:s 2) KSize1:s)) StrideW:s)))",

@@ -63,7 +63,7 @@ class Sketch:
             cache_line_size,
             max_n_buf,
             prime_factorize,
-            path.as_posix(),
+            path.with_suffix("").as_posix(),
         )
         return TorchFeatures.from_feat_pack(features)
 

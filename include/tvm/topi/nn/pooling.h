@@ -325,7 +325,9 @@ inline Tensor adaptive_pool_impl(const Tensor& x, const Array<PrimExpr>& output_
   ICHECK_EQ(axes.size(), n_dim) << "The number of axes not equal to the in/out dimension";
 
   Array<PrimExpr> data_shape = x->shape;
+  PrimExpr in_n_elems = 1;
   for (size_t i = 0; i < data_shape.size(); ++i) {
+    in_n_elems *= data_shape[i];
     data_shape.Set(i, cast(DataType::DataType::Int(32), data_shape[i]));
   }
   Array<PrimExpr> out_shape = data_shape;
@@ -364,15 +366,15 @@ inline Tensor adaptive_pool_impl(const Tensor& x, const Array<PrimExpr>& output_
         },
         "tensor", "adaptive_pool_max");
   } else if (pool_type == kAvgPool) {
-    auto pool_sum = tvm::te::compute(
-        out_shape,
-        [&](const Array<Var>& output) {
-          Array<PrimExpr> indices;
-          Array<tir::IterVar> reduce_axes;
-          std::tie(indices, reduce_axes) = get_iter_vars(output, true);
-          return tvm::sum(x(indices), reduce_axes);
-        },
-        "tensor", "adaptive_pool_sum");
+    auto pool_sum = tvm::te::compute(out_shape,
+                                     [&](const Array<Var>& output) {
+                                       Array<PrimExpr> indices;
+                                       Array<tir::IterVar> reduce_axes;
+                                       std::tie(indices, reduce_axes) = get_iter_vars(output, true);
+                                       return tvm::sum(x(indices), reduce_axes);
+                                     },
+                                     // Help FLOPs counter a bit with this one.
+                                     "tensor", "adaptive_pool_sum", {{"FLOP", in_n_elems}});
 
     return tvm::te::compute(
         out_shape,
@@ -549,9 +551,7 @@ inline Tensor pool_impl_nd(const Tensor& x, const Array<PrimExpr>& kernel_size,
       pad_tail[i] += offset[i];
     }
 
-    const int64_t* padding0 = as_const_int(pad_head[i]);
-    const int64_t* padding1 = as_const_int(pad_tail[i]);
-    do_pad = do_pad || (padding0 && *padding0) || (padding1 && *padding1);
+    do_pad = do_pad || !is_const_int(pad_head[i], 0) || is_const_int(pad_tail[i], 0);
 
     daxis.push_back(tvm::te::reduce_axis(Range(0, kernel[i]), "rv" + std::to_string(i)));
 

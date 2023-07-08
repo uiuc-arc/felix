@@ -200,5 +200,32 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetLoopBounds").set_body_typed([](Stmt stmt)
   return ret;
 });
 
+TVM_REGISTER_GLOBAL("auto_scheduler.ExtractConfigDict")
+    .set_body_typed([](const Array<Step>& steps) {
+      size_t split_count = 0;
+      Map<String, Integer> config;
+      for (auto& step : steps) {
+        if (auto* split = step.as<SplitStepNode>()) {
+          for (size_t i = 0; i < split->lengths.size(); ++i) {
+            // Name must match the one in sketch_policy_rule.cc
+            auto var_name = "sp_" + std::to_string(split_count) + "_" + std::to_string(i);
+            auto len = split->lengths[i];
+            auto* len_int = len.as<IntImmNode>();
+            ICHECK(len_int) << "Split length must be a constant integer";
+            config.Set(var_name, Integer(len_int->value));
+          }
+          split_count += 1;
+        } else if (auto* pragma = step.as<PragmaStepNode>()) {
+          std::string pstring = pragma->pragma_type, pat = "auto_unroll_max_step";
+          if (pstring.substr(0, pat.length()) == pat) {
+            auto unroll_size = std::stoi(pstring.substr(pat.length() + 1));  // skip "$"
+            auto var_name = "ur_" + std::to_string(pragma->stage_id);
+            config.Set(var_name, Integer(unroll_size));
+          }
+        }
+      }
+      return config;
+    });
+
 }  // namespace felix
 }  // namespace tvm

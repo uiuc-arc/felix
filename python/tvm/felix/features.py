@@ -29,7 +29,7 @@ class TorchFeatures(nn.Module):
         constraints_f,
         lin_cons: list,
         var_order: Dict[str, int],
-        var_decomp: Dict[str, Dict[int, tir.SizeVar]],
+        var_factors: Dict[str, Dict[int, tir.SizeVar]],
         n_feats: int,
         n_bufs: int,
     ):
@@ -38,8 +38,8 @@ class TorchFeatures(nn.Module):
         self.constraints_f = constraints_f
         self.lin_cons = lin_cons
         self.var_order = var_order
-        self.var_decomp = {
-            k: {int(prime): v.name for prime, v in ds.items()} for k, ds in var_decomp.items()
+        self.var_factors = {
+            k: {int(prime): v.name for prime, v in ds.items()} for k, ds in var_factors.items()
         }
         self.n_feats, self.n_bufs = n_feats, n_bufs
         self.n_consts = 0
@@ -66,7 +66,7 @@ class TorchFeatures(nn.Module):
         lin_cons = list(feat.linear_cons)
         all_cons = np.array([c.as_primexpr() for c in lin_cons] + other_cons)
         cons_f = TorchExprRunner(all_cons, var_order, vdefs).get_traced()
-        return cls(features_f, cons_f, lin_cons, var_order, feat.var_decomp, n_feats, n_bufs)
+        return cls(features_f, cons_f, lin_cons, var_order, feat.var_factors, n_feats, n_bufs)
 
     @property
     def device(self):
@@ -97,10 +97,10 @@ class TorchFeatures(nn.Module):
     def transform_config(self, config: Dict[str, Number]):
         stage1: Dict[str, Number] = {}
         for var_name, value in config.items():
-            if var_name not in self.var_decomp:
+            if var_name not in self.var_factors:
                 stage1[var_name] = value
                 continue
-            decomposed = self.var_decomp[var_name]
+            decomposed = self.var_factors[var_name]
             if value == 0:
                 for vname in decomposed.values():
                     stage1[vname] = -10  # HACK
@@ -139,7 +139,7 @@ class TorchFeatures(nn.Module):
             return int(v)
 
         stage1 = {k: config[idx].item() for k, idx in self.var_order.items()}
-        return {var: expr_to_int(stage1, d) for var, d in self.var_decomp.items()}
+        return {var: expr_to_int(stage1, d) for var, d in self.var_factors.items()}
 
     def _concat_knobs(self, consts: Tensor, knobs: Tensor):
         assert consts.shape[0] == knobs.shape[0]
