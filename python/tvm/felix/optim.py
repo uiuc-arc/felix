@@ -9,7 +9,13 @@ from tqdm import tqdm, trange
 from tvm.auto_scheduler.cost_model import MLPCostModel
 
 from .features import TorchFeatures
-from .sym_task import SymTask, TaskInstance, TaskLatFunc
+from .sym_task import (
+    MeasuredConfigInfo,
+    SymTask,
+    TaskInstance,
+    TaskPerfFunc,
+    print_perf,
+)
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Optimizer"]
@@ -19,10 +25,10 @@ PathLike = Union[Path, str]
 class Optimizer:
     def __init__(self, tasks: List[Tuple[SymTask, TaskInstance]], cost_model: MLPCostModel) -> None:
         self.timer = Timer()
-        self.tasks: Dict[int, TaskLatFunc] = {}
+        self.tasks: Dict[int, TaskPerfFunc] = {}
         for sym_task, inst in tqdm(tasks):
             with self.timer.time(f"create[{inst.idx}]"):
-                task_f = TaskLatFunc.from_task_sketches(
+                task_f = TaskPerfFunc.from_task_sketches(
                     sym_task, inst.sizes, inst.weight, cost_model
                 )
             if not task_f:
@@ -40,13 +46,31 @@ class Optimizer:
         n_measurements: int,
         log_file: Optional[PathLike] = None,
     ):
-        for idx, task_lat_f in self.tasks.items():
-            optimizer = TaskOptimizer(task_lat_f, lr, n_optim_steps, n_seed_configs)
+        results = {}
+        for idx, task_perf_f in self.tasks.items():
+            optimizer = TaskOptimizer(task_perf_f, lr, n_optim_steps, n_seed_configs)
             _logger.info(f"Tuning for task {idx}")
             with self.timer.time(f"tune[{idx}]"):
                 for _ in trange(n_optim_steps):
                     optimizer.optimize_step()
+                configs = optimizer.get_best_configs()
+            _logger.info("Measuring latency of best configs empirically...")
+            task_f = optimizer.task_f
+            with self.timer.time(f"measure[{idx}]"):
+                configs = task_f.measure_configs_latency(configs[:n_measurements])
+            assert idx not in results
+            results[idx] = task_f.weight, configs
+            print_configs(idx, task_f.weight, configs, True)
         total_lat = 0
+        configs = []
+        for idx in range(len(self.tasks)):
+            weight, configs_ = results.get(idx, (0, []))
+            best_perf = print_configs(idx, weight, configs_, False)
+            if best_perf is not None:
+                total_lat += best_perf.latency_us * weight
+            configs += configs_
+        if log_file is not None:
+            self.append_write_configs(configs, log_file)
         _logger.info("Total latency: %.2f us", total_lat)
         self.timer.log_all()
 
@@ -56,10 +80,38 @@ class Optimizer:
             f.writelines(output_json_lines)
 
 
+def print_configs(
+    idx: int,
+    weight: int,
+    configs: List[MeasuredConfigInfo],
+    print_each_config: bool,
+):
+    m_perf = [perf for c in configs if (perf := c.get_measured_perf()) is not None]
+    best_m_perf = max(m_perf, default=None)
+    best_p_perf = max([c.pred_perf for c in configs], default=None)
+    first_line = (
+        f"Task {idx}: best measured {print_perf(best_m_perf, weight)}, "
+        f"best predicted {print_perf(best_p_perf, weight)}. "
+    )
+    if print_each_config:
+        first_line += "Top configs:"
+        printed_configs = [
+            f"  pred perf={print_perf(config.pred_perf, weight)}, "
+            f"measured={print_perf(config.get_measured_perf(), weight)}, \n"
+            f"  config: {config.config} (from {config.sketch_f.sketch.backbone})"
+            for config in configs
+        ]
+    else:
+        printed_configs = []
+    logger_str = "\n".join([first_line] + printed_configs)
+    _logger.info(logger_str)
+    return best_m_perf
+
+
 class TaskOptimizer:
     def __init__(
         self,
-        task_f: TaskLatFunc,
+        task_f: TaskPerfFunc,
         lr: float,
         n_iters: int,
         n_configs: int,
@@ -121,6 +173,11 @@ class TaskOptimizer:
         # constraints: [n_sketches] x [n_steps, n_configs, n_constraints]
         constraints = [torch.stack(cs, dim=0) for cs in zip(*self._constraints)]
         return configs, costs, constraints
+
+    def get_best_configs(self):
+        # configs: [n_sketches] x [n_steps x n_configs, n_params]
+        configs = [torch.cat(cs, dim=0).round() for cs in zip(*self._configs)]
+        return self.task_f.get_best_configs(configs)
 
     def _fix_nan_grads(self, config_gen: TorchFeatures, conf: Tensor):
         grad = conf.grad

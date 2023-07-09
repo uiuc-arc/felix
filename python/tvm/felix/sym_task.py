@@ -1,6 +1,9 @@
 import logging
 import pickle as pkl
 from collections import defaultdict
+from dataclasses import dataclass
+from functools import total_ordering
+from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
 import onnx
@@ -14,6 +17,7 @@ from tvm.auto_scheduler.workload_registry import register_workload_tensors
 from . import ffi, utils
 from .sketch import Sketch, SketchPerfFunc
 from .sym_dag import RelayOpBuilder, SymbolicDAG
+from .utils import HW_PARAMS, TARGET, AnsorTaskWeight, PathLike
 
 _logger = logging.getLogger(__name__)
 __all__ = [
@@ -22,9 +26,8 @@ __all__ = [
     "SymTaskAndInstances",
     "batch_create_tasks",
     "extract_tasks",
-    "extract_tasks_",
     "load_and_register_tasks",
-    "load_and_register_tasks_",
+    "extract_tenset_pickle_tasks",
 ]
 
 
@@ -169,7 +172,7 @@ def batch_create_tasks(
     return ret_groups
 
 
-def extract_tasks(
+def extract_tasks_(
     model: Union[nn.Module, onnx.ModelProto],  # type: ignore
     example_inputs: Optional[utils.InputSpec] = None,
     save_to: Optional[utils.PathLike] = None,
@@ -191,12 +194,12 @@ def extract_tasks(
     return tasks
 
 
-def extract_tasks_(model, example_inputs=None, save_to=None, entry_pt_name=None):
-    tasks = extract_tasks(model, example_inputs, save_to, entry_pt_name)
+def extract_tasks(model, example_inputs=None, save_to=None, entry_pt_name=None):
+    tasks = extract_tasks_(model, example_inputs, save_to, entry_pt_name)
     return [(sym_task, instance) for sym_task, instances in tasks for instance in instances]
 
 
-def load_and_register_tasks(task_pkl: utils.PathLike):
+def load_and_register_tasks_(task_pkl: utils.PathLike):
     with open(task_pkl, "rb") as f:
         tasks = pkl.load(f)
     assert (
@@ -214,12 +217,140 @@ def load_and_register_tasks(task_pkl: utils.PathLike):
     return tasks
 
 
-def load_and_register_tasks_(task_pkl: utils.PathLike):
-    tasks = load_and_register_tasks(task_pkl)
+def load_and_register_tasks(task_pkl: utils.PathLike):
+    tasks = load_and_register_tasks_(task_pkl)
     return [(sym_task, instance) for sym_task, instances in tasks for instance in instances]
 
 
-class TaskLatFunc(nn.Module):
+def extract_tenset_pickle_tasks(tenset_task_pkl: PathLike, felix_task_pkl: PathLike):
+    def check_pair(pair) -> AnsorTaskWeight:
+        assert isinstance(pair[0], ansor.SearchTask)
+        assert isinstance(pair[1], int)
+        return pair
+
+    def patch_one_instance(sym_task, inst):
+        ansor_task = inst.ansor_task
+        new_ansor_dag = sym_task.sym_dag.make_ansor_compute_dag(inst.sizes)
+        if new_ansor_dag is None:
+            return None
+        if ansor_task.compute_dag.flop_ct == -1:
+            # Must do this to make sure the flops are updated in the task
+            # (otherwise copy on write and nothing happens)
+            dag = ansor_task.compute_dag
+            dag.flop_ct = new_ansor_dag.flop_ct
+            ansor_task.compute_dag = dag
+        return TaskInstance(inst.idx, inst.weight, inst.sizes, ansor_task)
+
+    def patch_instances(sym_task, instances):
+        return [
+            inst_ for inst in instances if (inst_ := patch_one_instance(sym_task, inst)) is not None
+        ]
+
+    if Path(felix_task_pkl).is_file():
+        return load_and_register_tasks(felix_task_pkl)
+    with open(tenset_task_pkl, "rb") as fr:
+        tasks = pkl.load(fr)
+    assert isinstance(tasks, list) and len(tasks) > 0
+    tasks = [check_pair(task) for task in tasks]
+    # Register workloads & override hardware params
+    for i in range(len(tasks)):
+        task, weight = tasks[i]
+        ansor.workload_registry.register_workload_tensors(
+            task.workload_key, task.compute_dag.tensors
+        )
+        task = ansor.SearchTask(
+            workload_key=task.workload_key, target=TARGET, hardware_params=HW_PARAMS
+        )
+        tasks[i] = task, weight
+    # Don't check the hash value of generated tasks against Tenset's.
+    # This forfeits a key safety check but is necessary as Tenset's DAGs
+    # are generated with TVM of an older version.
+    to_save = [
+        SymTaskAndInstances(sym_task, patch_instances(sym_task, instances))
+        for sym_task, instances in batch_create_tasks(tasks, hash_match=False, print_tasks=False)
+    ]
+    with open(felix_task_pkl, "wb") as fw:
+        pkl.dump(to_save, fw)
+    return [(sym_task, instance) for sym_task, instances in to_save for instance in instances]
+
+
+@dataclass
+@total_ordering
+class LatAndThruput:
+    latency_us: float
+    thruput_tflops: float
+
+    @classmethod
+    def from_thruput(cls, flops: float, thruput_tflops: float):
+        thruput_flops = thruput_tflops * 1e12
+        latency_us = flops / thruput_flops * 1e6
+        return cls(latency_us, thruput_tflops)
+
+    @classmethod
+    def from_latency_s(cls, flops: float, latency_sec: float):
+        latency_us = latency_sec * 1e6
+        thruput_tflops = flops / latency_sec / 1e12
+        return cls(latency_us, thruput_tflops)
+
+    def __lt__(self, other) -> bool:
+        if not isinstance(other, LatAndThruput):
+            return NotImplemented
+        return self.thruput_tflops < other.thruput_tflops
+
+
+@dataclass
+@total_ordering
+class PerfScore:
+    score: float
+
+    def __lt__(self, other) -> bool:
+        if not isinstance(other, PerfScore):
+            return NotImplemented
+        return self.score < other.score
+
+
+Performance = LatAndThruput | PerfScore
+
+
+def print_perf(shape: Optional[Performance], weight: int):
+    match shape:
+        case LatAndThruput(latency_us, thruput_tflops):
+            return f"{latency_us:.2f} us (*{weight}), {thruput_tflops:.4f} TFLOPs"
+        case PerfScore(score):
+            return f"score {score:.3f} (weight={weight})"
+        case None:
+            return "N/A"
+
+
+class ConfigInfo(NamedTuple):
+    config: Dict[str, int]
+    sketch_f: SketchPerfFunc
+    perf: Performance
+
+
+class MeasuredConfigInfo(NamedTuple):
+    config: Dict[str, int]
+    sketch_f: SketchPerfFunc
+    task_state: ansor.MeasureInput
+    pred_perf: Performance
+    measure_result: ansor.MeasureResult
+
+    def get_measured_perf(self) -> Optional[LatAndThruput]:
+        import numpy as np
+
+        mres = self.measure_result
+        if mres.error_no != 0:
+            return None
+        lat_sec = np.mean([float(x) for x in mres.costs])
+        return LatAndThruput.from_latency_s(self.sketch_f.get_flops(), lat_sec)
+
+    def to_tvm_string(self):
+        from tvm.auto_scheduler.measure_record import dump_record_to_string
+
+        return dump_record_to_string(self.task_state, self.measure_result)
+
+
+class TaskPerfFunc(nn.Module):
     def __init__(
         self,
         task: SymTask,
@@ -243,7 +374,7 @@ class TaskLatFunc(nn.Module):
         sketches = [
             lat_f
             for sketch in task.sketches
-            if (lat_f := SketchPerfFunc.from_sketch(sketch, sizes, perf_model)) is not None
+            if (lat_f := SketchPerfFunc(sketch, sizes, perf_model)) is not None
         ]
         if not sketches:
             return None
@@ -268,6 +399,73 @@ class TaskLatFunc(nn.Module):
 
     def rand_configs(self, n: int) -> List[Tensor]:
         return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
+
+    def get_best_configs(
+        self, configs: List[Tensor], remove_invalid: bool = True, dedup: bool = True
+    ):
+        """For each config, get its best version across all sketches.
+
+        `configs` is a list of configs and should have the same length as
+        what `rand_configs` returns (i.e., one Tensor per sketch).
+        """
+
+        # [n_sketches, n_configs]; [n_sketches] x [n_configs, n_constraints]
+        perfs, constraints = self.forward(configs)
+        sketches = self.sketches
+        ret: List[ConfigInfo] = []
+        configs_set = set()
+        max_perfs, best_sketch_ids = perfs.max(dim=0)
+        n_invalid, n_dup = 0, 0
+        for conf_i in range(len(best_sketch_ids)):
+            max_perf = max_perfs[conf_i].item()  # Get the perf per instance
+            best_sketch_i = int(best_sketch_ids[conf_i].item())
+            best_conf = configs[best_sketch_i][conf_i]
+            is_nan = torch.any(torch.isnan(best_conf))
+            is_inf = torch.any(torch.isinf(best_conf))
+            cons = constraints[best_sketch_i][conf_i]
+            violates_cons = torch.sum(torch.relu(cons) ** 2).item() > 0
+            if remove_invalid and (is_nan or is_inf or violates_cons):
+                n_invalid += 1
+                continue
+            best_sketch = sketches[best_sketch_i]
+            orig_config = best_sketch.features.inv_transform_config(best_conf)
+            if self.is_throughput:
+                best_perf = LatAndThruput.from_thruput(self.flops, max_perf)
+            else:
+                best_perf = PerfScore(max_perf)
+            cinfo = ConfigInfo(orig_config, best_sketch, best_perf)
+            if dedup:
+                config_kvs = tuple(sorted(orig_config.items(), key=lambda x: x[0]))
+                if config_kvs not in configs_set:
+                    ret.append(cinfo)
+                    configs_set.add(config_kvs)
+                else:
+                    n_dup += 1
+            else:
+                ret.append(cinfo)
+        _logger.info(
+            f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
+        )
+        return sorted(ret, key=lambda x: x.perf, reverse=True)
+
+    def measure_configs_latency(self, cs: List[ConfigInfo]):
+        by_sketch: Dict[SketchPerfFunc, List[int]] = defaultdict(list)
+        for idx, config in enumerate(cs):
+            by_sketch[config.sketch_f].append(idx)
+        ret: List[Optional[MeasuredConfigInfo]] = [None] * len(cs)
+        for sketch_f, indices in by_sketch.items():
+            configs_ = [cs[i].config for i in indices]
+            con_task, results = sketch_f.measure_configs(configs_)
+            for idx, (state, mres) in zip(indices, results):
+                if mres.error_no != 0:
+                    _logger.warning(mres.error_msg)
+                config = cs[idx]
+                task_state = ansor.MeasureInput(con_task, state)
+                ret[idx] = MeasuredConfigInfo(
+                    config.config, config.sketch_f, task_state, config.perf, mres
+                )
+        assert all(x is not None for x in ret)
+        return cast(List[MeasuredConfigInfo], ret)
 
     def __repr__(self) -> str:
         return (

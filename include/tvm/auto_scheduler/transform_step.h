@@ -256,6 +256,12 @@ class AnnotationStepNode : public StepNode {
   /*! \brief The annotation type of this step. */
   IteratorAnnotation annotation;
 
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("annotation", &annotation);
+  }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -315,6 +321,11 @@ class FuseStepNode : public StepNode {
  public:
   /*! \brief The ids of iterators to fuse. */
   Array<Integer> fused_ids;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("fused_ids", &fused_ids);
+  }
 
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
@@ -380,6 +391,12 @@ class PragmaStepNode : public StepNode {
   /*! \brief The pragma string. */
   String pragma_type;
 
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("pragma_type", &pragma_type);
+  }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -441,6 +458,11 @@ class ReorderStepNode : public StepNode {
    * This array should specify the order of all iterators.
    */
   Array<Integer> after_ids;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("after_ids", &after_ids);
+  }
 
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
@@ -511,6 +533,14 @@ class SplitStepNode : public StepNode {
    * from inner level to outer level
    */
   bool inner_to_outer;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("extent", &extent);
+    v->Visit("lengths", &lengths);
+    v->Visit("inner_to_outer", &inner_to_outer);
+  }
 
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
@@ -583,6 +613,13 @@ class FollowSplitStepNode : public StepNode {
   int src_step_id;
   /*! \brief The number of split level. */
   int n_split;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("src_step_id", &src_step_id);
+    v->Visit("n_split", &n_split);
+  }
 
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
@@ -665,6 +702,14 @@ class FollowFusedSplitStepNode : public StepNode {
   /*! \brief If this is true, use factor. Otherwise, use nparts. */
   bool factor_or_nparts;
 
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("src_step_ids", &src_step_ids);
+    v->Visit("level", &level);
+    v->Visit("factor_or_nparts", &factor_or_nparts);
+  }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -744,6 +789,13 @@ class StorageAlignStepNode : public StepNode {
   /*! \brief The offset in the alignment specification. */
   int offset;
 
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("factor", &factor);
+    v->Visit("offset", &offset);
+  }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -808,6 +860,12 @@ class ComputeAtStepNode : public StepNode {
   /*! \brief The index of iterator in target stage that this step will compute at to. */
   int target_iter_id;
 
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("target_stage_id", &target_stage_id);
+    v->Visit("target_iter_id", &target_iter_id);
+  }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -868,6 +926,8 @@ class ComputeAtStep : public Step {
 /*! \brief Compute inline step that corresponds to te::Stage::compute_inline */
 class ComputeInlineStepNode : public StepNode {
  public:
+  void VisitAttrs(tvm::AttrVisitor* v) { v->Visit("stage_id", &stage_id); }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -923,6 +983,8 @@ class ComputeInlineStep : public Step {
 /*! \brief Compute root step that corresponds to te::Stage::compute_root */
 class ComputeRootStepNode : public StepNode {
  public:
+  void VisitAttrs(tvm::AttrVisitor* v) { v->Visit("stage_id", &stage_id); }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -992,6 +1054,11 @@ class CacheReadStepNode : public StepNode {
   String scope_name;
   /*! \brief The indices of read stages. */
   Array<Integer> reader_stage_ids;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("scope_name", &scope_name);
+    v->Visit("reader_stage_ids", &reader_stage_ids);
+  }
 
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
@@ -1064,6 +1131,11 @@ class CacheWriteStepNode : public StepNode {
   /*! \brief The scope name of the newly added compute stage. (e.g. local, shared, global) */
   String scope_name;
 
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("scope_name", &scope_name);
+  }
+
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 
   /*!
@@ -1130,6 +1202,12 @@ class RfactorStepNode : public StepNode {
   int iter_id;
   /*! \brief The position where the new iterator is placed. */
   int factor_iter_id;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
+    v->Visit("iter_id", &iter_id);
+    v->Visit("factor_iter_id", &factor_iter_id);
+  }
 
   void WriteToRecord(dmlc::JSONWriter* writer) const final;
 

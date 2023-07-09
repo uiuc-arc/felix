@@ -7,7 +7,7 @@ from tvm import tir
 from tvm.arith import _ffi_api as _arith
 from tvm.auto_scheduler import _ffi_api as _ansor
 from tvm.auto_scheduler.loop_state import StateObject
-from tvm.auto_scheduler.search_policy import SketchPolicy
+from tvm.auto_scheduler.search_policy import SearchPolicy, SketchPolicy
 from tvm.felix import _ffi_api as _felix
 from tvm.tir import _ffi_api as _tir
 
@@ -32,7 +32,7 @@ class FeaturePack(tvm.Object):
     expressions: List[Tuple[str, tir.PrimExpr]]
     free_vars: List[str]
     linear_cons: List[LinearExpr]
-    var_decomp: Dict[str, Dict[int, tir.SizeVar]]
+    var_factors: Dict[str, Dict[int, tir.SizeVar]]
 
 
 # PrimExpr Utils
@@ -61,8 +61,8 @@ def generate_all_sym_sketches(policy: SketchPolicy) -> List[StateObject]:
     return _felix.GenerateAllSymSketches(policy)
 
 
-def extract_backbone(state: StateObject) -> tuple[str, ...]:
-    return tuple(_felix.ExtractBackbone(state.transform_steps))
+def extract_backbone(steps: List[tvm.Object]) -> tuple[str, ...]:
+    return tuple(_felix.ExtractBackbone(steps))
 
 
 def generate_code_for_state(
@@ -106,3 +106,17 @@ def get_loop_bounds(code: tir.Stmt) -> List[Tuple[str, tir.PrimExpr]]:
 
 def extract_config_dict(state: StateObject) -> Dict[str, int]:
     return {str(k): int(v) for k, v in _felix.ExtractConfigDict(state.transform_steps).items()}
+
+
+def state_from_config(
+    con_task: ansor.SearchTask, steps: List[tvm.Object], config: Dict[str, int]
+) -> StateObject:
+    return _felix.StateFromConfig(con_task, steps, config)
+
+
+def measure_performance(
+    policy: SearchPolicy,
+    measurer: ansor.measure.ProgramMeasurer,
+    states: List[StateObject],
+) -> List[ansor.measure.MeasureResult]:
+    return _felix.MeasurePerformance(policy, measurer, states)

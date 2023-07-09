@@ -226,5 +226,56 @@ TVM_REGISTER_GLOBAL("felix.ExtractConfigDict").set_body_typed([](const Array<Ste
   return config;
 });
 
+TVM_REGISTER_GLOBAL("felix.StateFromConfig")
+    .set_body_typed([](const SearchTask& con_task, const Array<Step>& transform_steps,
+                       const Map<String, Integer>& config) {
+      size_t split_count = 0;
+      const auto& task_dag = con_task->compute_dag;
+      auto state = task_dag->init_state;
+      // Create and replay steps, starting from the initial state of concrete task.
+      for (auto step : transform_steps) {
+        if (auto* split = step.as<SplitStepNode>()) {
+          auto lengths = split->lengths;
+          // The extents are symbolic in the incoming steps, which needs to be replaced with
+          // concrete values. It seems that this extent value is not truly used though,
+          // so we just set it to 1.
+          auto extent = Integer(1);
+          for (size_t i = 0; i < lengths.size(); ++i) {
+            // Name must match the one in sketch_policy_rule.cc and in ExtractConfigDict()
+            auto var_name = "sp_" + std::to_string(split_count) + "_" + std::to_string(i);
+            // Occasionally some variable may not appear at all in the features, and they won't
+            // be in `config` either. In this case, we just use the default value 1.
+            lengths.Set(i, config.Get(var_name).value_or(1));
+          }
+          step = SplitStep(split->stage_id, split->iter_id, extent, lengths, split->inner_to_outer);
+          split_count += 1;
+        } else if (auto* pragma = step.as<PragmaStepNode>()) {
+          std::string pstring = pragma->pragma_type, pat = "auto_unroll_max_step";
+          if (pstring.substr(0, pat.length()) == pat) {
+            auto var_name = "ur_" + std::to_string(pragma->stage_id);
+            String new_pragma_type =
+                pat + "$" + std::to_string(config.Get(var_name).value_or(1)->value);
+            step = PragmaStep(pragma->stage_id, pragma->iter_id, new_pragma_type);
+          }
+        }
+        state.CopyOnWrite()->transform_steps.push_back(step);
+        StepApplyToState(step, &state, task_dag);
+        state = task_dag.InferBound(state);
+      }
+      return state;
+    });
+
+TVM_REGISTER_GLOBAL("felix.MeasurePerformance")
+    .set_body_typed([](const SearchPolicy& policy, const ProgramMeasurer& measurer,
+                       const Array<State>& states) {
+      auto search_task = policy->search_task;
+      Array<MeasureInput> m_inputs;
+      for (auto& st : states) {
+        m_inputs.push_back(MeasureInput(search_task, st));
+      }
+      auto results = measurer->Measure(search_task, policy, m_inputs);
+      ICHECK(results.size() == m_inputs.size());
+      return results;
+    });
 }  // namespace felix
 }  // namespace tvm

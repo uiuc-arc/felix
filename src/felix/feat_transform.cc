@@ -645,6 +645,10 @@ class FeaturePack {
         factors = Factorize(expr_int->value);
       }
       this->InsertShapeVarFactors(vname, factors, size_subst_);
+      // Drop shape vars from var_factors to not send them to Python side
+      // (if TorchFeatures.inv_transform_config see Ei variables it will fail to find values for
+      // them).
+      this->var_factors.erase(vname);
     }
     // 2. Some (many) knobs can become trivial during size concretization; add all that is 0 to
     // size_subst_ as well.

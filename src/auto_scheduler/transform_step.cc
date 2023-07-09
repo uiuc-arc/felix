@@ -89,6 +89,21 @@ struct Handler<::tvm::Array<::tvm::Optional<::tvm::Integer>>> {
 namespace tvm {
 namespace auto_scheduler {
 
+TVM_REGISTER_NODE_TYPE(AnnotationStepNode);
+TVM_REGISTER_NODE_TYPE(FuseStepNode);
+TVM_REGISTER_NODE_TYPE(PragmaStepNode);
+TVM_REGISTER_NODE_TYPE(ReorderStepNode);
+TVM_REGISTER_NODE_TYPE(SplitStepNode);
+TVM_REGISTER_NODE_TYPE(FollowSplitStepNode);
+TVM_REGISTER_NODE_TYPE(FollowFusedSplitStepNode);
+TVM_REGISTER_NODE_TYPE(StorageAlignStepNode);
+TVM_REGISTER_NODE_TYPE(ComputeAtStepNode);
+TVM_REGISTER_NODE_TYPE(ComputeInlineStepNode);
+TVM_REGISTER_NODE_TYPE(ComputeRootStepNode);
+TVM_REGISTER_NODE_TYPE(CacheReadStepNode);
+TVM_REGISTER_NODE_TYPE(CacheWriteStepNode);
+TVM_REGISTER_NODE_TYPE(RfactorStepNode);
+
 // Update the te::stage to tir::IterVar axis mapping
 void UpdateStageToAxesMap(const te::Stage& stage, StageToAxesMap* stage_to_axes) {
   if (auto pop = stage->op.as<te::ComputeOpNode>()) {

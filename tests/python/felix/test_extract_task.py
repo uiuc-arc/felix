@@ -7,13 +7,10 @@ import tvm
 import tvm.testing
 from torchvision.models import mobilenet_v2, resnet50
 from torchvision.models.video import r3d_18
-from tvm import felix
-from tvm.felix import ffi
+from tvm.felix import ffi, nn, sym_task
 
 
 def dcgan():
-    from tvm.felix import nn
-
     network, shape = nn.dcgan()
     return network, [1, *shape]
 
@@ -493,7 +490,7 @@ TASK_SKETCHES: Dict[str, List[Union[SketchCodeDesc, SketchCodeRef]]] = {
 }
 
 
-def check_tasks(tasks: List[felix.SymTaskAndInstances], expected: Dict[str, List[int]]):
+def check_tasks(tasks: List[sym_task.SymTaskAndInstances], expected: Dict[str, List[int]]):
     assert len(tasks) == len(expected)
     for task, instances in tasks:
         desc = str(task)
@@ -525,9 +522,9 @@ def check_tasks(tasks: List[felix.SymTaskAndInstances], expected: Dict[str, List
 def test_extract_task(network_name: str):
     network, shape = NETWORKS[network_name]()
     inputs = torch.randn(shape)
-    tasks = felix.extract_tasks(network, inputs, save_to=f"/tmp/{network_name}.pkl")
+    tasks = sym_task.extract_tasks_(network, inputs, save_to=f"/tmp/{network_name}.pkl")
     check_tasks(tasks, NETWORK_TASKS[network_name])
-    tasks_ = felix.load_and_register_tasks(f"/tmp/{network_name}.pkl")
+    tasks_ = sym_task.load_and_register_tasks_(f"/tmp/{network_name}.pkl")
     check_tasks(tasks_, NETWORK_TASKS[network_name])
 
 

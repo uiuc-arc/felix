@@ -20,55 +20,6 @@ PathLike = Union[str, Path]
 FelixTasks = List[Tuple[felix.SymTask, felix.TaskInstance]]
 
 
-def extract_tenset_pickle_tasks(task_pkl: PathLike):
-    def check_pair(pair) -> AnsorTaskWeight:
-        assert isinstance(pair[0], ansor.SearchTask)
-        assert isinstance(pair[1], int)
-        return pair
-
-    def patch_one_instance(sym_task, inst):
-        ansor_task = inst.ansor_task
-        new_ansor_dag = sym_task.sym_dag.make_ansor_compute_dag(inst.sizes)
-        if new_ansor_dag is None:
-            return None
-        if ansor_task.compute_dag.flop_ct == -1:
-            # Must do this to make sure the flops are updated in the task
-            # (otherwise copy on write and nothing happens)
-            dag = ansor_task.compute_dag
-            dag.flop_ct = new_ansor_dag.flop_ct
-            ansor_task.compute_dag = dag
-        return felix.TaskInstance(inst.idx, inst.weight, inst.sizes, ansor_task)
-
-    def patch_instances(sym_task, instances):
-        return [
-            inst_ for inst in instances if (inst_ := patch_one_instance(sym_task, inst)) is not None
-        ]
-
-    with open(task_pkl, "rb") as f:
-        tasks = pkl.load(f)
-    assert isinstance(tasks, list) and len(tasks) > 0
-    tasks = [check_pair(task) for task in tasks]
-    # Register workloads & override hardware params
-    for i in range(len(tasks)):
-        task, weight = tasks[i]
-        ansor.workload_registry.register_workload_tensors(
-            task.workload_key, task.compute_dag.tensors
-        )
-        task = ansor.SearchTask(
-            workload_key=task.workload_key, target=felix.TARGET, hardware_params=felix.HW_PARAMS
-        )
-        tasks[i] = task, weight
-    # Don't check the hash value of generated tasks against Tenset's.
-    # This forfeits a key safety check but is necessary as Tenset's DAGs
-    # are generated with TVM of an older version.
-    return [
-        felix.SymTaskAndInstances(sym_task, patch_instances(sym_task, instances))
-        for sym_task, instances in felix.batch_create_tasks(
-            tasks, hash_match=False, print_tasks=False
-        )
-    ]
-
-
 def load_ansor_configs_stream(tasks: FelixTasks, config_files: List[Path]):
     from tvm.auto_scheduler import RecordReader
 
@@ -169,21 +120,15 @@ def load_configs(tasks: FelixTasks, config_jsons: List[Path]):
     return builder.to_dataset()
 
 
-def make_dataset(tasks_pkl: Path):
+def make_dataset(tenset_tasks_pkl: Path):
     work_dir = Path("lightning_logs") / felix.TARGET.model / "measure_records"
-    feat_pkl = work_dir / f"{tasks_pkl.stem}_features.pkl"
-    felix_tasks_pkl = work_dir / tasks_pkl.name
+    feat_pkl = work_dir / f"{tenset_tasks_pkl.stem}_features.pkl"
+    felix_tasks_pkl = work_dir / tenset_tasks_pkl.name
     if feat_pkl.exists():
         dataset = torch.load(feat_pkl)
         assert isinstance(dataset, SegmentDataset)
         return dataset
-    if felix_tasks_pkl.exists():
-        tasks = felix.load_and_register_tasks_(felix_tasks_pkl)
-    else:
-        tasks_ = extract_tenset_pickle_tasks(tasks_pkl)
-        with open(felix_tasks_pkl, "wb") as f:
-            pkl.dump(tasks_, f)
-        tasks = [(sym_task, inst) for sym_task, instances in tasks_ for inst in instances]
+    tasks = felix.extract_tenset_pickle_tasks(tenset_tasks_pkl, felix_tasks_pkl)
     conf_jsons = list(work_dir.rglob("**/*.json"))
     _logger.info(f"Found {len(conf_jsons)} json files.")
     dataset = load_configs(tasks, conf_jsons)

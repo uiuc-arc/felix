@@ -21,11 +21,6 @@ __all__ = [
 Num = Union[int, float]
 
 
-def make_label(flops, lat_sec):
-    # output from model is trained to be throughput (TFlops/s)
-    return flops / lat_sec / 1e12
-
-
 def moving_average(average, update):
     if average is None:
         return update
@@ -182,15 +177,15 @@ class DatasetBuilder:
         self.labels: List[float] = []
         self.conf_meta: List[dict] = []
 
-    def add_config_(self, feature: Tensor, flops: Num, latencies: Num, conf_meta: dict):
-        if (label := make_label(flops, latencies)) <= 0:
+    def add_config_(self, feature: Tensor, flops: Num, latency: Num, conf_meta: dict):
+        if (label := self.make_label(flops, latency)) <= 0:
             return
         self.features.append(feature)
         self.labels.append(label)
         self.conf_meta.append(conf_meta)
 
     def add_configs_(self, features: list, flops: float, latencies: Tensor):
-        labels = make_label(flops, latencies)
+        labels = self.make_label(flops, latencies)
         for feat_, label_ in zip(features, labels):
             if label_ > 0:
                 self.features.append(feat_)
@@ -202,6 +197,10 @@ class DatasetBuilder:
         return SegmentDataset(
             seg_size, torch.cat(self.features, dim=0), torch.tensor(self.labels), conf_meta
         )
+
+    def make_label(self, flops, lat_sec):
+        # output from model is trained to be throughput (TFlops/s)
+        return flops / lat_sec / 1e12
 
 
 class SegmentDataset(data.Dataset):

@@ -237,7 +237,7 @@ def process_inp_res_pairs(
         state = inputs[i].state
         config = {
             "state": state,
-            "backbone": ffi.extract_backbone(state),
+            "backbone": ffi.extract_backbone(state.transform_steps),
             "var_values": ffi.extract_config_dict(state),
             "time": mean_cost,
         }
