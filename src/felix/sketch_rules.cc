@@ -633,7 +633,7 @@ Array<State> GenerateAllSymSketches(const SketchPolicy& sketch_policy) {
   return Array<State>(sketches.begin(), sketches.end());
 }
 
-TVM_REGISTER_GLOBAL("auto_scheduler.GenerateAllSymSketches").set_body_typed(GenerateAllSymSketches);
+TVM_REGISTER_GLOBAL("felix.GenerateAllSymSketches").set_body_typed(GenerateAllSymSketches);
 
 }  // namespace felix
 }  // namespace tvm

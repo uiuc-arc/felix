@@ -65,7 +65,7 @@ class LinearExprNode : public Object {
     v->Visit("constant", &constant);
   }
 
-  static constexpr const char* _type_key = "ansor.LinearExpr";
+  static constexpr const char* _type_key = "felix.LinearExpr";
   TVM_DECLARE_FINAL_OBJECT_INFO(LinearExprNode, Object);
 };
 
@@ -441,7 +441,7 @@ class FeaturePackPyNode : public Object {
     v->Visit("var_factors", &var_factors);
   }
 
-  static constexpr const char* _type_key = "ansor.FeaturePackPy";
+  static constexpr const char* _type_key = "felix.FeaturePackPy";
   TVM_DECLARE_FINAL_OBJECT_INFO(FeaturePackPyNode, Object);
 };
 
@@ -965,7 +965,7 @@ std::optional<FeaturePack> GetFeaturePack(Stmt& stmt, VarContext& context,
   return fp;
 }
 
-TVM_REGISTER_GLOBAL("auto_scheduler.GetFeaturePack")
+TVM_REGISTER_GLOBAL("felix.GetFeaturePack")
     .set_body_typed([](Stmt stmt, VarContext context, auto_scheduler::HardwareParams hw_params,
                        Map<String, Integer> sizes, size_t cache_line_size, size_t max_n_bufs,
                        bool factoring, String save_load_prefix) {
@@ -996,7 +996,7 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetFeaturePack")
       return fp.IntoPythonFeaturePack();
     });
 
-TVM_REGISTER_GLOBAL("auto_scheduler.LinearExprAsPrimExpr").set_body_typed([](LinearExpr e) {
+TVM_REGISTER_GLOBAL("felix.LinearExprAsPrimExpr").set_body_typed([](LinearExpr e) {
   return e.ToPrimExpr();
 });
 

@@ -113,7 +113,7 @@ String PrintTrStep(const Step& step) {
   return os.str();
 }
 
-TVM_REGISTER_GLOBAL("auto_scheduler.ExtractBackbone").set_body_typed([](const Array<Step>& steps) {
+TVM_REGISTER_GLOBAL("felix.ExtractBackbone").set_body_typed([](const Array<Step>& steps) {
   Array<String> ret;
   for (auto& step : steps) {
     if (step.as<AnnotationStepNode>()) {
@@ -179,9 +179,9 @@ class ForLoopCollector : public StmtExprVisitor {
   std::vector<const BufferRealizeNode*> bufreal_nodes;
 };
 
-TVM_REGISTER_GLOBAL("auto_scheduler.PrintTrStep").set_body_typed(PrintTrStep);
+TVM_REGISTER_GLOBAL("felix.PrintTrStep").set_body_typed(PrintTrStep);
 
-TVM_REGISTER_GLOBAL("auto_scheduler.GenerateCodeForState")
+TVM_REGISTER_GLOBAL("felix.GenerateCodeForState")
     .set_body_typed([](const SearchTask& task, State state, Bool symbolic) {
       bool is_sym = symbolic->value;
       VarContextNode* var_context = is_sym ? &state.GetVarContext() : nullptr;
@@ -190,7 +190,7 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GenerateCodeForState")
       return Array<ObjectRef>{code, GetRef<VarContext>(var_context)};
     });
 
-TVM_REGISTER_GLOBAL("auto_scheduler.GetLoopBounds").set_body_typed([](Stmt stmt) {
+TVM_REGISTER_GLOBAL("felix.GetLoopBounds").set_body_typed([](Stmt stmt) {
   ForLoopCollector collector;
   collector(stmt);
   Array<Array<ObjectRef>> ret;
@@ -200,32 +200,31 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetLoopBounds").set_body_typed([](Stmt stmt)
   return ret;
 });
 
-TVM_REGISTER_GLOBAL("auto_scheduler.ExtractConfigDict")
-    .set_body_typed([](const Array<Step>& steps) {
-      size_t split_count = 0;
-      Map<String, Integer> config;
-      for (auto& step : steps) {
-        if (auto* split = step.as<SplitStepNode>()) {
-          for (size_t i = 0; i < split->lengths.size(); ++i) {
-            // Name must match the one in sketch_policy_rule.cc
-            auto var_name = "sp_" + std::to_string(split_count) + "_" + std::to_string(i);
-            auto len = split->lengths[i];
-            auto* len_int = len.as<IntImmNode>();
-            ICHECK(len_int) << "Split length must be a constant integer";
-            config.Set(var_name, Integer(len_int->value));
-          }
-          split_count += 1;
-        } else if (auto* pragma = step.as<PragmaStepNode>()) {
-          std::string pstring = pragma->pragma_type, pat = "auto_unroll_max_step";
-          if (pstring.substr(0, pat.length()) == pat) {
-            auto unroll_size = std::stoi(pstring.substr(pat.length() + 1));  // skip "$"
-            auto var_name = "ur_" + std::to_string(pragma->stage_id);
-            config.Set(var_name, Integer(unroll_size));
-          }
-        }
+TVM_REGISTER_GLOBAL("felix.ExtractConfigDict").set_body_typed([](const Array<Step>& steps) {
+  size_t split_count = 0;
+  Map<String, Integer> config;
+  for (auto& step : steps) {
+    if (auto* split = step.as<SplitStepNode>()) {
+      for (size_t i = 0; i < split->lengths.size(); ++i) {
+        // Name must match the one in sketch_policy_rule.cc
+        auto var_name = "sp_" + std::to_string(split_count) + "_" + std::to_string(i);
+        auto len = split->lengths[i];
+        auto* len_int = len.as<IntImmNode>();
+        ICHECK(len_int) << "Split length must be a constant integer";
+        config.Set(var_name, Integer(len_int->value));
       }
-      return config;
-    });
+      split_count += 1;
+    } else if (auto* pragma = step.as<PragmaStepNode>()) {
+      std::string pstring = pragma->pragma_type, pat = "auto_unroll_max_step";
+      if (pstring.substr(0, pat.length()) == pat) {
+        auto unroll_size = std::stoi(pstring.substr(pat.length() + 1));  // skip "$"
+        auto var_name = "ur_" + std::to_string(pragma->stage_id);
+        config.Set(var_name, Integer(unroll_size));
+      }
+    }
+  }
+  return config;
+});
 
 }  // namespace felix
 }  // namespace tvm
