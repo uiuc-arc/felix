@@ -300,17 +300,17 @@ class PerfScore:
         return self.score < other.score
 
 
-Performance = LatAndThruput | PerfScore
+Performance = Union[LatAndThruput, PerfScore]
 
 
 def print_perf(shape: Optional[Performance], weight: int):
-    match shape:
-        case LatAndThruput(latency_us, thruput_tflops):
-            return f"{latency_us:.2f} us (*{weight}), {thruput_tflops:.4f} TFLOPs"
-        case PerfScore(score):
-            return f"score {score:.3f} (weight={weight})"
-        case None:
-            return "N/A"
+    if isinstance(shape, LatAndThruput):
+        return f"{shape.latency_us:.2f} us (*{weight}), {shape.thruput_tflops:.4f} TFLOPs"
+    if isinstance(shape, PerfScore):
+        return f"score {shape.score:.3f} (weight={weight})"
+    if shape is None:
+        return "N/A"
+    assert False
 
 
 class ConfigInfo(NamedTuple):

@@ -61,7 +61,7 @@ def generate_all_sym_sketches(policy: SketchPolicy) -> List[StateObject]:
     return _felix.GenerateAllSymSketches(policy)
 
 
-def extract_backbone(steps: List[tvm.Object]) -> tuple[str, ...]:
+def extract_backbone(steps: List[tvm.Object]) -> Tuple[str, ...]:
     return tuple(_felix.ExtractBackbone(steps))
 
 
