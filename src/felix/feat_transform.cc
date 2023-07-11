@@ -821,7 +821,7 @@ class StmtSimplifier : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const ForNode* node) final {
-    PrimExpr extent = SimplifyExpr(this->rinf.GetMax(node->extent));
+    PrimExpr extent = GetRangeMax(node->extent);
     this->rinf.Bind(node->loop_var, Range::FromMinExtent(0, extent), true);
     Stmt body = StmtExprMutator::VisitStmt(node->body);
     return For(node->loop_var, 0, extent, node->kind, body);
@@ -829,7 +829,7 @@ class StmtSimplifier : public StmtExprMutator {
 
   Stmt VisitStmt_(const AttrStmtNode* node) final {
     if (node->attr_key == tir::attr::thread_extent || node->attr_key == tir::attr::virtual_thread) {
-      PrimExpr extent = SimplifyExpr(this->rinf.GetMax(node->value));
+      PrimExpr extent = GetRangeMax(node->value);
       const Var& var = node->node.as<IterVarNode>()->var;
       this->rinf.Bind(var, Range::FromMinExtent(0, extent), true);
       Stmt body = StmtExprMutator::VisitStmt(node->body);
@@ -854,7 +854,7 @@ class StmtSimplifier : public StmtExprMutator {
   Stmt VisitStmt_(const AllocateNode* op) final {
     Array<PrimExpr> extents;
     for (const auto& x : op->extents) {
-      extents.push_back(SimplifyExpr(this->rinf.GetMax(x)));
+      extents.push_back(GetRangeMax(x));
     }
     return Allocate(op->buffer_var, op->dtype, extents, op->condition,
                     StmtExprMutator::VisitStmt(op->body), op->annotations);
@@ -864,8 +864,7 @@ class StmtSimplifier : public StmtExprMutator {
     TryChangingBufferShape(node->buffer);
     Array<Range> bounds;
     for (auto& r : node->bounds) {
-      auto max = SimplifyExpr(this->rinf.GetMax(r->extent));
-      bounds.push_back(Range::FromMinExtent(0, max));
+      bounds.push_back(Range::FromMinExtent(0, GetRangeMax(r->extent)));
     }
     return BufferRealize(node->buffer, bounds, node->condition,
                          StmtExprMutator::VisitStmt(node->body));
@@ -875,7 +874,7 @@ class StmtSimplifier : public StmtExprMutator {
     TryChangingBufferShape(node->buffer);
     Array<PrimExpr> indices;
     for (auto& index : node->indices) {
-      indices.push_back(SimplifyExpr(index));
+      indices.push_back(this->SimplifyExpr(index));
     }
     return BufferStore(node->buffer, StmtExprMutator::VisitExpr(node->value), indices);
   }
@@ -884,7 +883,7 @@ class StmtSimplifier : public StmtExprMutator {
     TryChangingBufferShape(node->buffer);
     Array<PrimExpr> indices;
     for (auto& index : node->indices) {
-      indices.push_back(SimplifyExpr(index));
+      indices.push_back(this->SimplifyExpr(index));
     }
     return BufferLoad(node->buffer, indices);
   }
@@ -922,6 +921,10 @@ class StmtSimplifier : public StmtExprMutator {
       return it->second;
     }
     return this->_memo[expr] = arith::SimplifyExpr(expr);
+  }
+
+  PrimExpr GetRangeMax(const PrimExpr& expr) {
+    return this->SimplifyExpr(this->rinf.GetMax(this->SimplifyExpr(expr)));
   }
 
   RangeInfer& rinf;
