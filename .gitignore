@@ -250,3 +250,4 @@ jvm/target
 .ci-py-scripts/
 
 lightning_logs/
+.dataset_cache/

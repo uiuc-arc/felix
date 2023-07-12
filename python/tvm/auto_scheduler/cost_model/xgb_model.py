@@ -17,16 +17,20 @@
 # pylint: disable=invalid-name
 
 """Cost model based on xgboost"""
-import multiprocessing
 import logging
+import multiprocessing
 from collections import defaultdict
 
 import numpy as np
-
 from tvm.autotvm.tuner.metric import max_curve
-from .cost_model import PythonBasedModel
-from ..feature import get_per_store_features_from_measure_pairs, get_per_store_features_from_states
+
+from ..feature import (
+    get_per_store_features_from_measure_pairs,
+    get_per_store_features_from_states,
+)
 from ..measure_record import RecordReader
+from .cost_model import PythonBasedModel
+from .dataset import Dataset
 
 xgb = None
 
@@ -343,6 +347,100 @@ class XGBModel(PythonBasedModel):
         self.bst.load_model(file_name)
         self.num_warmup_sample = -1
 
+    def train_on_dataset(self, train_set, valid_set):
+        logger.info("Fit a xgb booster. Train size: %d" % len(train_set))
+        dtrain = self._dataset_to_dmatrix(train_set)
+        if valid_set is not None:
+            dtest = self._dataset_to_dmatrix(valid_set)
+            eval_sets = [(dtrain, "tr"), (dtest, "te")]
+        else:
+            eval_sets = [(dtrain, "tr")]
+        # Train a new model
+        self.bst = xgb.train(
+            params=self.xgb_params,
+            dtrain=dtrain,
+            num_boost_round=300,
+            obj=pack_sum_square_error,
+            callbacks=[
+                custom_callback(
+                    stopping_rounds=100,
+                    metric="tr-p-rmse",
+                    fevals=[pack_sum_rmse, pack_sum_average_peak_score(self.plan_size)],
+                    evals=eval_sets,
+                    maximize=False,
+                    verbose_eval=self.verbose_eval,
+                )
+            ],
+        )
+
+    def predict_on_dataset(self, dataset):
+        ret = {}
+        for task, features in dataset.features.items():
+            ret[task] = self.predict_on_task(self.bst, task, features)
+        return ret
+
+    def predict_on_task(self, model, task, features):
+        if model is None:
+            return np.zeros(len(features), dtype=np.float32)
+
+        # Convert features to dmatrix
+        tmp_set = Dataset.create_one_task(task, features, None)
+        dmatrix = self._dataset_to_dmatrix(tmp_set)
+
+        # Make predictions
+        raw_preds = model.predict(dmatrix)
+        pack_ids = dmatrix_context.get("pack_ids", dmatrix)
+        return predict_throughput_pack_sum(raw_preds, pack_ids)
+
+    def _dataset_to_dmatrix(self, dataset, use_workload_embedding: bool = True):
+        # Process input data to xgb format
+        xs, ys, gids = [], [], []
+        for gid, task in enumerate(dataset.features):
+            features, throughputs = dataset.features[task], dataset.throughputs[task]
+            # add task embedding into the feature
+            if use_workload_embedding:
+                task_embedding = get_workload_embedding(task.workload_key)
+                extended_features = []
+                # append task embedding into feature vectors
+                for i in range(len(features)):
+                    tmp = np.tile(task_embedding, (len(features[i]), 1))
+                    extended_features.append(np.concatenate([features[i], tmp], axis=1))
+                xs.extend(extended_features)
+            else:
+                xs.extend(features)
+            if throughputs is None:
+                ys.append(np.zeros(len(features), dtype=np.float32))
+            else:
+                ys.append(throughputs)
+            gids.append(np.ones(len(features), dtype=np.int32) * gid)
+        xs = np.array(xs, dtype=object)
+        ys = np.concatenate(ys)
+        gids = np.concatenate(gids)
+        return pack_sum_xgbmatrix(xs, ys, gids=gids, weights=ys)
+
+
+def get_workload_embedding(workload_key):
+    from tvm.auto_scheduler.compute_dag import ComputeDAG
+    from tvm.auto_scheduler.workload_registry import workload_key_to_tensors
+
+    tags = [
+        "max",
+        "min",
+        "add",
+        "Conv2dOutput",
+        "conv2d_winograd",
+        "DepthwiseConv2d",
+        "dense",
+        "softmax",
+        "compute(b, i, j)",
+    ]
+    dag_str = str(ComputeDAG(workload_key_to_tensors(workload_key)))
+    vec = [0] * len(tags)
+    for i, tag in enumerate(tags):
+        if tag in dag_str:
+            vec[i] = 1
+    return vec
+
 
 def feature_to_pack_sum_xgbmatrix(xs):
     """Convert an extracted multi-stage feature vector to a xgbmatrx in pack-sum format
@@ -387,7 +485,7 @@ def pack_sum_xgbmatrix(xs, ys, gids=None, weights=None):
     """
     if gids is not None:
         # sort by group
-        indices = gids.argsort()
+        indices = gids.argsort(kind="stable")
         xs, ys = xs[indices], ys[indices]
         group_sizes = np.bincount(gids)
         if weights is not None:
@@ -551,8 +649,8 @@ def custom_callback(
 ):
     """Callback function for xgboost to support multiple custom evaluation functions"""
     # pylint: disable=import-outside-toplevel
-    from xgboost.core import EarlyStopException
     from xgboost.callback import _fmt_metric
+    from xgboost.core import EarlyStopException
 
     try:
         from xgboost.training import aggcv
@@ -626,7 +724,7 @@ def custom_callback(
                     continue
                 infos.append("%s: %.6f" % (item[0], item[1]))
 
-            logger.debug("\t".join(infos))
+            logger.info("\t".join(infos))
             if log_file:
                 with open(log_file, "a") as fout:
                     fout.write("\t".join(infos) + "\n")

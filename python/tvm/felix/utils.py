@@ -1,4 +1,5 @@
 import logging
+import pickle
 import typing as ty
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,6 +121,52 @@ def get_tvm_mod(
     raise ValueError(f"Model type {type(model)} unsupported")
 
 
+def extract_ansor_tasks(
+    model: Union[nn.Module, onnx.ModelProto],  # type: ignore
+    example_inputs: Optional[InputSpec] = None,
+    entry_pt_name: Optional[str] = None,
+    save_to: Optional[PathLike] = None,
+):
+    logging.getLogger("topi").setLevel(logging.WARNING)
+    mod, params = get_tvm_mod(model, example_inputs, entry_pt_name=entry_pt_name)
+    logger.debug("Module (Relay IR): \n%s", mod["main"])
+    tasks, task_weights = ansor.extract_tasks(
+        mod["main"], params, TARGET, hardware_params=HW_PARAMS
+    )
+    assert len(tasks) == len(task_weights)
+    task_weights = [int(w) for w in task_weights]
+    ret = sorted(zip(tasks, task_weights), key=lambda x: parse_task(x[0])[0][0])
+    if save_to is not None:
+        with open(save_to, "wb") as f:
+            pickle.dump(ret, f)
+    return ret
+
+
+def load_and_register_ansor_tasks(task_pkl: PathLike, override_hw: bool) -> List[AnsorTaskWeight]:
+    from tvm import auto_scheduler as ansor
+
+    def check_pair(pair) -> Tuple[ansor.SearchTask, int]:
+        assert isinstance(pair[0], ansor.SearchTask)
+        assert isinstance(pair[1], int)
+        return pair
+
+    with open(task_pkl, "rb") as f:
+        tasks = pickle.load(f)
+    assert isinstance(tasks, list) and len(tasks) > 0
+    tasks = [check_pair(task) for task in tasks]
+    for i in range(len(tasks)):
+        task, weight = tasks[i]
+        ansor.workload_registry.register_workload_tensors(
+            task.workload_key, task.compute_dag.tensors
+        )
+        if override_hw:
+            task = ansor.SearchTask(
+                workload_key=task.workload_key, target=TARGET, hardware_params=HW_PARAMS
+            )
+            tasks[i] = task, weight
+    return tasks
+
+
 def _check_nhwc_on_torch(model: nn.Module):
     from torch.nn.intrinsic.quantized import ConvReLU2d as QConvReLU2d
     from torch.nn.quantized import Conv2d as QConv2d
@@ -185,11 +232,11 @@ def get_cuda_code(task: ansor.SearchTask, state: StateObject):
     return func.imported_modules[0].get_source()
 
 
-def load_tuned_configs(tasks: List[AnsorTaskWeight], config_files: Sequence[PathLike]):
+def load_tuned_configs(tasks: List[ansor.SearchTask], config_files: Sequence[PathLike]):
     from tvm.auto_scheduler import RecordReader
 
     configs_slots: Dict[str, Tuple[ansor.SearchTask, List[InpResPair]]] = {
-        task.workload_key: (task, []) for task, _ in tasks
+        task.workload_key: (task, []) for task in tasks
     }
     unknown_keys = set()
     for file in config_files:
@@ -293,6 +340,11 @@ def parse_task(task: ansor.SearchTask, keep_all_inputs: bool = True):
     task_desc, n_args = _parse_tvm_func_name(task.desc)
     shapes = shapes[:-1] if keep_all_inputs else shapes[:n_args]
     return task_desc, shapes
+
+
+def parse_task_name(task_desc: str):
+    task_desc_, _ = _parse_tvm_func_name(task_desc)
+    return short_print_names(task_desc_)
 
 
 def short_print_names(types_indices: List[Tuple[str, int]]):

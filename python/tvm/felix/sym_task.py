@@ -178,16 +178,7 @@ def extract_tasks_(
     save_to: Optional[utils.PathLike] = None,
     entry_pt_name: Optional[str] = None,
 ):
-    logging.getLogger("topi").setLevel(logging.WARNING)
-    mod, params = utils.get_tvm_mod(model, example_inputs, entry_pt_name=entry_pt_name)
-    _logger.debug("Module (Relay IR): \n%s", mod["main"])
-    tasks, task_weights = ansor.extract_tasks(
-        mod["main"], params, utils.TARGET, hardware_params=utils.HW_PARAMS
-    )
-    assert len(tasks) == len(task_weights)
-    task_weights = [int(w) for w in task_weights]
-    tasks_weights = sorted(zip(tasks, task_weights), key=lambda x: utils.parse_task(x[0])[0][0])
-    tasks = batch_create_tasks(tasks_weights)
+    tasks = batch_create_tasks(utils.extract_ansor_tasks(model, example_inputs, entry_pt_name))
     if save_to is not None:
         with open(save_to, "wb") as f:
             pkl.dump(tasks, f)
