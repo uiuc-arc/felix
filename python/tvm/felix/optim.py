@@ -9,13 +9,7 @@ from tqdm import tqdm, trange
 from tvm.auto_scheduler.cost_model import MLPCostModel
 
 from .features import TorchFeatures
-from .sym_task import (
-    MeasuredConfigInfo,
-    SymTask,
-    TaskInstance,
-    TaskPerfFunc,
-    print_perf,
-)
+from .sym_task import ConfigInfo, SymTask, TaskInstance, TaskPerfFunc, print_perf
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Optimizer"]
@@ -28,14 +22,7 @@ class Optimizer:
         self.tasks: Dict[int, TaskPerfFunc] = {}
         for sym_task, inst in tqdm(tasks):
             with self.timer.time(f"create[{inst.idx}]"):
-                task_f = TaskPerfFunc.from_task_sketches(
-                    sym_task, inst.sizes, inst.weight, cost_model
-                )
-            if not task_f:
-                _logger.warning(
-                    "No valid sketches found for task %s with sizes %s", sym_task, inst.sizes
-                )
-                continue
+                task_f = TaskPerfFunc(sym_task, inst.sizes, inst.weight, cost_model)
             self.tasks[inst.idx] = task_f
 
     def tune_one_round(
@@ -57,35 +44,28 @@ class Optimizer:
             _logger.info("Measuring latency of best configs empirically...")
             task_f = optimizer.task_f
             with self.timer.time(f"measure[{idx}]"):
-                configs = task_f.measure_configs_latency(configs[:n_measurements])
+                mcs = task_f.measure_configs_latency_(configs[:n_measurements])
             assert idx not in results
             results[idx] = task_f.weight, configs
-            print_configs(idx, task_f.weight, configs, True)
+            # Print only measured configs one by one.
+            print_configs(idx, task_f.weight, mcs, True)
         total_lat = 0
         configs = []
-        for idx in range(len(self.tasks)):
-            weight, configs_ = results.get(idx, (0, []))
+        for idx in self.tasks:
+            weight, configs_ = results[idx]
             best_perf = print_configs(idx, weight, configs_, False)
             if best_perf is not None:
                 total_lat += best_perf.latency_us * weight
             configs += configs_
         if log_file is not None:
-            self.append_write_configs(configs, log_file)
+            output_json_lines = [c.to_tvm_string() for c in configs]
+            with open(log_file, "w") as f:
+                f.writelines(output_json_lines)
         _logger.info("Total latency: %.2f us", total_lat)
         self.timer.log_all()
 
-    def append_write_configs(self, configs, to_file):
-        output_json_lines = [c.to_tvm_string() for c in configs]
-        with open(to_file, "w") as f:
-            f.writelines(output_json_lines)
 
-
-def print_configs(
-    idx: int,
-    weight: int,
-    configs: List[MeasuredConfigInfo],
-    print_each_config: bool,
-):
+def print_configs(idx: int, weight: int, configs: List[ConfigInfo], print_each_config: bool):
     m_perf = [perf for c in configs if (perf := c.get_measured_perf()) is not None]
     best_m_perf = max(m_perf, default=None)
     best_p_perf = max([c.pred_perf for c in configs], default=None)

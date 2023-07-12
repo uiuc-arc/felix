@@ -114,9 +114,18 @@ def state_from_config(
     return _felix.StateFromConfig(con_task, steps, config)
 
 
-def measure_performance(
+def measure_state_performance(
     policy: SearchPolicy,
     measurer: ansor.measure.ProgramMeasurer,
     states: List[StateObject],
+) -> List[ansor.MeasureResult]:
+    mis = [ansor.MeasureInput(policy.search_task, state) for state in states]
+    return _felix.MeasurePerformance(policy, measurer, mis)
+
+
+def measure_mis_performance(
+    policy: SearchPolicy,
+    measurer: ansor.measure.ProgramMeasurer,
+    mis: List[ansor.MeasureInput],
 ) -> List[ansor.measure.MeasureResult]:
-    return _felix.MeasurePerformance(policy, measurer, states)
+    return _felix.MeasurePerformance(policy, measurer, mis)

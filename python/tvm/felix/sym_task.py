@@ -12,6 +12,7 @@ from torch import Tensor, nn
 from tqdm import tqdm
 from tvm import auto_scheduler as ansor
 from tvm.auto_scheduler.cost_model import MLPCostModel
+from tvm.auto_scheduler.measure_record import dump_record_to_string
 from tvm.auto_scheduler.workload_registry import register_workload_tensors
 
 from . import ffi, utils
@@ -44,17 +45,10 @@ class SymTaskAndInstances(NamedTuple):
 
 
 class SymTask:
-    def __init__(
-        self,
-        sym_dag: SymbolicDAG,
-        sym_ansor_dag: ansor.ComputeDAG,
-        const_names: List[str],
-    ):
+    def __init__(self, sym_dag: SymbolicDAG, sym_ansor_dag: ansor.ComputeDAG):
         self.sym_dag = sym_dag
-        self.ansor_dag = sym_ansor_dag
-        self.const_names = const_names
-        self.ansor_task, self.ansor_policy = self.make_task_from_dag(sym_ansor_dag)
-        sketches = ffi.generate_all_sym_sketches(self.ansor_policy)
+        self.ansor_task, ansor_policy = self.make_task_from_dag(sym_ansor_dag)
+        sketches = ffi.generate_all_sym_sketches(ansor_policy)
         self.sketches = [Sketch(self, sketch) for sketch in sketches]
         self._backbone_to_sketch: Dict[tuple, List[Sketch]] = defaultdict(list)
         for sketch in self.sketches:
@@ -132,15 +126,15 @@ def batch_create_tasks(
     grouped_ = tqdm(grouped.items(), total=len(grouped)) if progress else grouped.items()
     for sym_dag, instances in grouped_:
         indices = [instance.idx for instance in instances]
-        size_dicts = [instance.sizes for instance in instances]
-        size_params, _ = utils.coalesce_dicts(size_dicts)
+        # Run this to make sure all instances have the same size parameters
+        size_params, _ = utils.coalesce_dicts([instance.sizes for instance in instances])
         _logger.debug(f"Creating DAG {repr(sym_dag)} (task indices {indices})")
         ansor_dag = sym_dag.make_ansor_compute_dag(None)
         if ansor_dag is None:
             n_no_ansor_dag += len(instances)
             _logger.debug("Skipping task as its DAG generation is not supported")
             continue
-        task = SymTask(sym_dag, ansor_dag, size_params)
+        task = SymTask(sym_dag, ansor_dag)
         if len(task.sketches) == 0:
             n_no_sketches += len(instances)
             _logger.debug("Skipping task as no sketch is found")
@@ -313,63 +307,48 @@ def print_perf(shape: Optional[Performance], weight: int):
     assert False
 
 
-class ConfigInfo(NamedTuple):
+@dataclass
+class ConfigInfo:
     config: Dict[str, int]
     sketch_f: SketchPerfFunc
-    perf: Performance
-
-
-class MeasuredConfigInfo(NamedTuple):
-    config: Dict[str, int]
-    sketch_f: SketchPerfFunc
-    task_state: ansor.MeasureInput
     pred_perf: Performance
-    measure_result: ansor.MeasureResult
+    measure_input: Optional[ansor.MeasureInput] = None
+    measure_result: Optional[ansor.MeasureResult] = None
 
     def get_measured_perf(self) -> Optional[LatAndThruput]:
         import numpy as np
 
         mres = self.measure_result
-        if mres.error_no != 0:
+        if mres is None or mres.error_no != 0:
             return None
         lat_sec = np.mean([float(x) for x in mres.costs])
         return LatAndThruput.from_latency_s(self.sketch_f.get_flops(), lat_sec)
 
-    def to_tvm_string(self):
-        from tvm.auto_scheduler.measure_record import dump_record_to_string
+    def get_measure_input(self):
+        if self.measure_input is None:
+            self.measure_input = self.sketch_f.make_measure_inputs([self.config])[0]
+        return self.measure_input
 
-        return dump_record_to_string(self.task_state, self.measure_result)
+    def to_tvm_string(self):
+        mres = self.measure_result
+        if mres is None:
+            mres = ansor.MeasureResult([], 0, "", 0, 0)
+        return dump_record_to_string(self.get_measure_input(), mres)
 
 
 class TaskPerfFunc(nn.Module):
     def __init__(
-        self,
-        task: SymTask,
-        sizes: Dict[str, int],
-        weight: int,
-        sketches: List[SketchPerfFunc],
-        model_ret_throughput: bool,
+        self, task: SymTask, sizes: Dict[str, int], weight: int, perf_model: MLPCostModel
     ) -> None:
         super().__init__()
-        self.task = task
+        self.sym_task = task
         self.sizes = sizes
         self.weight = weight
+        self.ansor_task, self.ansor_policy = task.make_concrete_task(sizes)
+        sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
         self._sketches = nn.ModuleList(sketches)
-        self.is_throughput = model_ret_throughput
+        self.is_throughput = perf_model.is_throughput
         self.flops = task.get_flops(sizes)
-
-    @classmethod
-    def from_task_sketches(
-        cls, task: SymTask, sizes: Dict[str, int], weight: int, perf_model: MLPCostModel
-    ):
-        sketches = [
-            lat_f
-            for sketch in task.sketches
-            if (lat_f := SketchPerfFunc(sketch, sizes, perf_model)) is not None
-        ]
-        if not sketches:
-            return None
-        return cls(task, sizes, weight, sketches, perf_model.is_throughput)
 
     @property
     def sketches(self):
@@ -391,9 +370,7 @@ class TaskPerfFunc(nn.Module):
     def rand_configs(self, n: int) -> List[Tensor]:
         return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
 
-    def get_best_configs(
-        self, configs: List[Tensor], remove_invalid: bool = True, dedup: bool = True
-    ):
+    def get_best_configs(self, configs: List[Tensor], remove_invalid: bool = True):
         """For each config, get its best version across all sketches.
 
         `configs` is a list of configs and should have the same length as
@@ -401,62 +378,50 @@ class TaskPerfFunc(nn.Module):
         """
 
         # [n_sketches, n_configs]; [n_sketches] x [n_configs, n_constraints]
+        n_invalid, n_dup = 0, 0
         perfs, constraints = self.forward(configs)
-        sketches = self.sketches
+        max_perfs, best_sketch_ids = perfs.max(dim=0)
         ret: List[ConfigInfo] = []
         configs_set = set()
-        max_perfs, best_sketch_ids = perfs.max(dim=0)
-        n_invalid, n_dup = 0, 0
-        for conf_i in range(len(best_sketch_ids)):
-            max_perf = max_perfs[conf_i].item()  # Get the perf per instance
-            best_sketch_i = int(best_sketch_ids[conf_i].item())
-            best_conf = configs[best_sketch_i][conf_i]
-            is_nan = torch.any(torch.isnan(best_conf))
-            is_inf = torch.any(torch.isinf(best_conf))
-            cons = constraints[best_sketch_i][conf_i]
-            violates_cons = torch.sum(torch.relu(cons) ** 2).item() > 0
-            if remove_invalid and (is_nan or is_inf or violates_cons):
-                n_invalid += 1
-                continue
-            best_sketch = sketches[best_sketch_i]
-            orig_config = best_sketch.features.inv_transform_config(best_conf)
-            if self.is_throughput:
-                best_perf = LatAndThruput.from_thruput(self.flops, max_perf)
-            else:
-                best_perf = PerfScore(max_perf)
-            cinfo = ConfigInfo(orig_config, best_sketch, best_perf)
-            if dedup:
-                config_kvs = tuple(sorted(orig_config.items(), key=lambda x: x[0]))
-                if config_kvs not in configs_set:
-                    ret.append(cinfo)
-                    configs_set.add(config_kvs)
-                else:
+        for idx, sketch in enumerate(self.sketches):
+            configs_ = configs[idx]
+            nan_or_inf = torch.any(torch.isnan(configs_) | torch.isinf(configs_), dim=1)
+            violates_cons = torch.sum(torch.relu(constraints[idx]) ** 2, dim=1) > 0
+            invalid = nan_or_inf | violates_cons
+            sketch_mask = best_sketch_ids == idx
+            if remove_invalid:
+                n_invalid += torch.sum(sketch_mask & invalid).item()
+                sketch_mask &= ~invalid
+            for conf_i in torch.nonzero(sketch_mask).squeeze(1):
+                config_dict = sketch.features.inv_transform_config(configs_[conf_i])
+                config_kvs = tuple(sorted(config_dict.items(), key=lambda x: x[0]))
+                if config_kvs in configs_set:
                     n_dup += 1
-            else:
-                ret.append(cinfo)
+                    continue
+                configs_set.add(config_kvs)
+                perf = max_perfs[conf_i].item()
+                if self.is_throughput:
+                    perf = LatAndThruput.from_thruput(self.flops, perf)
+                else:
+                    perf = PerfScore(perf)
+                ret.append(ConfigInfo(config_dict, sketch, perf))
         _logger.info(
             f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
         )
-        return sorted(ret, key=lambda x: x.perf, reverse=True)
+        return sorted(ret, key=lambda x: x.pred_perf, reverse=True)
 
-    def measure_configs_latency(self, cs: List[ConfigInfo]):
-        by_sketch: Dict[SketchPerfFunc, List[int]] = defaultdict(list)
-        for idx, config in enumerate(cs):
-            by_sketch[config.sketch_f].append(idx)
-        ret: List[Optional[MeasuredConfigInfo]] = [None] * len(cs)
-        for sketch_f, indices in by_sketch.items():
-            configs_ = [cs[i].config for i in indices]
-            con_task, results = sketch_f.measure_configs(configs_)
-            for idx, (state, mres) in zip(indices, results):
-                if mres.error_no != 0:
-                    _logger.warning(mres.error_msg)
-                config = cs[idx]
-                task_state = ansor.MeasureInput(con_task, state)
-                ret[idx] = MeasuredConfigInfo(
-                    config.config, config.sketch_f, task_state, config.perf, mres
-                )
-        assert all(x is not None for x in ret)
-        return cast(List[MeasuredConfigInfo], ret)
+    def measure_configs_latency_(self, configs: List[ConfigInfo]):
+        from tvm.auto_scheduler.measure import ProgramMeasurer
+
+        measurer = ProgramMeasurer(ansor.LocalBuilder(), utils.MEASURER, [], False)
+        results = ffi.measure_mis_performance(
+            self.ansor_policy, measurer, [c.get_measure_input() for c in configs]
+        )
+        for c, result in zip(configs, results):
+            if result.error_no != 0:
+                _logger.warning(result.error_msg)
+            c.measure_result = result
+        return configs
 
     def __repr__(self) -> str:
         return (

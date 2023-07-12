@@ -267,14 +267,9 @@ TVM_REGISTER_GLOBAL("felix.StateFromConfig")
 
 TVM_REGISTER_GLOBAL("felix.MeasurePerformance")
     .set_body_typed([](const SearchPolicy& policy, const ProgramMeasurer& measurer,
-                       const Array<State>& states) {
-      auto search_task = policy->search_task;
-      Array<MeasureInput> m_inputs;
-      for (auto& st : states) {
-        m_inputs.push_back(MeasureInput(search_task, st));
-      }
-      auto results = measurer->Measure(search_task, policy, m_inputs);
-      ICHECK(results.size() == m_inputs.size());
+                       const Array<MeasureInput>& mis) {
+      auto results = measurer->Measure(policy->search_task, policy, mis);
+      ICHECK(results.size() == mis.size());
       return results;
     });
 }  // namespace felix

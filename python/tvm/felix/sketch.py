@@ -3,13 +3,13 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from torch import Tensor, nn
-from tvm.auto_scheduler import LocalBuilder
+from tvm.auto_scheduler import MeasureInput
 from tvm.auto_scheduler.cost_model import MLPCostModel
 from tvm.auto_scheduler.loop_state import StateObject
 
 from . import ffi
 from .features import TorchFeatures
-from .utils import HW_PARAMS, MEASURER
+from .utils import HW_PARAMS
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Sketch"]
@@ -61,15 +61,6 @@ class Sketch:
         )
         return TorchFeatures.from_feat_pack(features)
 
-    def measure_configs(self, shape: dict, configs: List[Dict[str, int]]):
-        from tvm.auto_scheduler.measure import ProgramMeasurer
-
-        measurer = ProgramMeasurer(LocalBuilder(), MEASURER, [], False)
-        ansor_task, policy = self.parent_task.make_concrete_task(shape)
-        states = [ffi.state_from_config(ansor_task, self.tr_steps, c) for c in configs]
-        perfs = ffi.measure_performance(policy, measurer, states)
-        return ansor_task, list(zip(states, perfs))
-
     def __str__(self) -> str:
         return f"Sketch({self.backbone} from {self.parent_task})"
 
@@ -77,20 +68,24 @@ class Sketch:
 
 
 class SketchPerfFunc(nn.Module):
-    def __init__(self, sketch: Sketch, sizes: dict, cost_f: MLPCostModel) -> None:
+    def __init__(self, task_perf_f, sketch: Sketch, cost_f: MLPCostModel) -> None:
         super().__init__()
         self.sketch = sketch
-        self.sizes = sizes
-        self.features = sketch.fetch_features(sizes)
+        self.task_perf_f = task_perf_f
+        self.features = sketch.fetch_features(task_perf_f.sizes)
         self.cost_f = cost_f
 
     def get_flops(self):
-        return self.sketch.parent_task.get_flops(self.sizes)
+        return self.sketch.parent_task.get_flops(self.task_perf_f.sizes)
 
     def forward(self, configs: Tensor) -> Tuple[Tensor, Tensor]:
         feats, constraints = self.features(configs)
         perf = self.cost_f.forward(feats)
         return perf, constraints
 
-    def measure_configs(self, configs: List[Dict[str, int]]):
-        return self.sketch.measure_configs(self.sizes, configs)
+    def make_measure_inputs(self, configs: List[Dict[str, int]]):
+        task = self.task_perf_f.ansor_task
+        return [
+            MeasureInput(task, ffi.state_from_config(task, self.sketch.tr_steps, c))
+            for c in configs
+        ]
