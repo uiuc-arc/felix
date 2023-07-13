@@ -1056,6 +1056,7 @@ class CacheReadStepNode : public StepNode {
   Array<Integer> reader_stage_ids;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("stage_id", &stage_id);
     v->Visit("scope_name", &scope_name);
     v->Visit("reader_stage_ids", &reader_stage_ids);
   }
