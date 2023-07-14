@@ -32,10 +32,10 @@ class AnsorMLPModel(PythonBasedModel):
     def __init__(self, model_path: str) -> None:
         super().__init__()
         checkpoint = torch.load(model_path, map_location="cpu")
-        loss_func = checkpoint["hyper_parameters"]["loss_func"]
+        lf = checkpoint["hyper_parameters"]["loss_func"]
         n_feats = checkpoint["hyper_parameters"]["n_features"]
-        self.model = MLPCostModel(n_feats, 256, loss_func)
-        self.loss_f = MLPLossFunc(loss_func)
+        self.model = MLPCostModel(n_feats, 256, lf == "log_mse", lf != "rank")
+        self.loss_f = MLPLossFunc(lf)
         self.optim = torch.optim.Adam(self.model.parameters(), lr=7e-4, weight_decay=1e-6)
         self.model.load_state_dict(checkpoint["state_dict"])
         self.model = self.model.eval().cuda()
@@ -112,16 +112,24 @@ class AnsorMLPModel(PythonBasedModel):
 
 
 class MLPCostModel(nn.Module):
-    def __init__(self, in_dim, hidden_dim, loss_func: str, out_dim: int = 1, use_norm=False):
+    def __init__(
+        self,
+        in_dim,
+        hidden_dim,
+        output_log: bool,
+        is_throughput: bool,
+        out_dim: int = 1,
+        use_norm: bool = False,
+    ):
         super().__init__()
+        self.output_log = output_log
+        self.is_throughput = is_throughput
         self.segment_encoder = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
         )
-        self.output_logged = loss_func == "log_mse"
-        self.is_throughput = loss_func != "rank"
         self.norm = nn.BatchNorm1d(hidden_dim) if use_norm else nn.Identity()
         self.l0 = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -166,7 +174,7 @@ class MLPCostModel(nn.Module):
         output = self.l0(output) + output
         output = self.l1(output) + output
         output = self.decoder(output).squeeze(-1)
-        if self.output_logged and inference:
+        if self.output_log and inference:
             output = torch.exp(output)
         return output
 

@@ -18,6 +18,7 @@ PathLike = Union[str, Path]
 class MLPModelPLWrapper(MLPCostModel, pl.LightningModule):
     def __init__(
         self,
+        n_features: int = 154,
         lr: float = 7e-4,
         wd: float = 1e-6,
         batch_size: int = 512,
@@ -28,30 +29,25 @@ class MLPModelPLWrapper(MLPCostModel, pl.LightningModule):
             "peak_score@1": lambda x, y: cm.metric_peak_score(x, y, 1),
             "peak_score@5": lambda x, y: cm.metric_peak_score(x, y, 5),
         }
-        main_log_f = cm.MLPLossFunc(loss_func)
-        if loss_func in ("mse", "log_mse"):
+        if loss_func != "rank":
             other_metric_fs["rank_loss"] = cm.MLPLossFunc("rank")
-        elif loss_func == "rank":
-            other_metric_fs["MSE"] = cm.MLPLossFunc("mse")
-            other_metric_fs["logMSE"] = cm.MLPLossFunc("log_mse")
-        else:
-            raise ValueError(f"Unknown loss function {loss_func}")
-        super().__init__(154, 256, loss_func)
+        super().__init__(n_features, 256, loss_func == "log_mse", loss_func != "rank")
+        self.main_loss = loss_func
+        self.main_loss_f = cm.MLPLossFunc(loss_func)
         self.loss_func_map: Dict[str, nn.Module] = other_metric_fs
         self.lr = lr
         self.wd = wd
         self.batch_size = batch_size
-        self.loss_func = loss_func, main_log_f
         self.train_set = self.val_set = None
         self.save_hyperparameters()
 
     @property
     def val_loss_name(self):
-        return f"val/{self.loss_func[0]}_loss"
+        return f"val/{self.main_loss}_loss"
 
-    def add_dataset_(self, dataset: cm.SegmentDataset):
+    def set_dataset_(self, dataset: cm.SegmentDataset, split_ratio: float):
         n_datum = len(dataset)
-        n_train = int(n_datum * 0.8)
+        n_train = int(n_datum * split_ratio)
         n_val = n_datum - n_train
         logger.info(f"Loaded {(n_train, n_val)} data points.")
         self.train_set, self.val_set = data.random_split(dataset, [n_train, n_val])
@@ -59,16 +55,14 @@ class MLPModelPLWrapper(MLPCostModel, pl.LightningModule):
     def training_step(self, batch, _):
         seg_sizes, features, labels, _ = batch
         output = self.forward_in_segments(seg_sizes, features, inference=False)
-        loss_f_name, loss_f = self.loss_func
-        loss = loss_f(output, labels)
-        self.log(f"train/{loss_f_name}", loss, batch_size=self.batch_size)
+        loss = self.main_loss_f(output, labels)
+        self.log(f"train/{self.main_loss}_loss", loss, batch_size=self.batch_size)
         return loss
 
     def validation_step(self, batch, _):
         seg_sizes, features, labels, _ = batch
         output = self.forward_in_segments(seg_sizes, features, inference=False)
-        _, loss_f = self.loss_func
-        loss = loss_f(output, labels)
+        loss = self.main_loss_f(output, labels)
         self.log(self.val_loss_name, loss, batch_size=self.batch_size)
         for name, loss_f in self.loss_func_map.items():
             loss = loss_f(output, labels)

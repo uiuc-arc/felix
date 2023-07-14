@@ -207,7 +207,7 @@ class Dataset:
         return sum(len(x) for x in self.throughputs.values())
 
 
-def make_dataset_from_log_file(log_files, out_file, min_sample_size, verbose=1):
+def make_dataset_from_log_file(log_files, min_sample_size, verbose=1):
     """Make a dataset file from raw log files"""
     from tqdm import tqdm
 
@@ -270,8 +270,4 @@ def make_dataset_from_log_file(log_files, out_file, min_sample_size, verbose=1):
         del dataset.throughputs[task]
         del dataset.min_latency[task]
 
-    # Save to disk
-    pickle.dump(dataset, open(out_file, "wb"))
-
-    if verbose >= 0:
-        logger.info("A dataset file is saved to %s" % out_file)
+    return dataset
