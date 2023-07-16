@@ -17,8 +17,10 @@
 """Batch matrix multiplication"""
 # pylint: disable=invalid-name
 import logging
+
 import tvm
-from tvm import te, auto_scheduler
+from tvm import auto_scheduler, te
+
 from ..utils import get_const_tuple
 
 logger = logging.getLogger("topi")
@@ -88,12 +90,12 @@ def batch_matmul(
     assert XK == YK or isinstance(YK, tvm.tir.expr.Var), "shapes of x and y are inconsistent"
     k = te.reduce_axis((0, XK), name="k")
     if oshape is None:
-        assert XB == YB or XB == 1 or YB == 1, "batch dimension doesn't match"
-        batch = (
-            tvm.tir.expr.SizeVar("batch", "int32")
-            if isinstance(XB, tvm.tir.expr.Var) or isinstance(YB, tvm.tir.expr.Var)
-            else te.max(XB, YB)
-        )
+        if XB == YB or YB == 1:
+            batch = XB
+        elif XB == 1:
+            batch = YB
+        else:
+            assert False, "batch dimension doesn't match"
         oshape = (batch, XI, YJ)
     if out_dtype is None:
         out_dtype = tensor_a.dtype

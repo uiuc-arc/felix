@@ -19,11 +19,11 @@
 """Conv2D operators"""
 from __future__ import absolute_import as _abs
 
-from collections import namedtuple
 import re
-from typing import Union, Sequence
-import numpy as np
+from collections import namedtuple
+from typing import Sequence, Union
 
+import numpy as np
 import tvm
 from tvm import auto_scheduler, te
 
@@ -1000,6 +1000,8 @@ def _conv2d_winograd_nhwc_impl(
     output : tvm.Tensor
         4-D with shape [batch, out_height, out_width, out_channel]
     """
+    from ...tir import IntImm
+
     N, H, W, CI = get_const_tuple(data.shape)
     if isinstance(dilation, int):
         dilation_h = dilation_w = dilation
@@ -1031,12 +1033,12 @@ def _conv2d_winograd_nhwc_impl(
     alpha = m + r - 1
     A, B, G = winograd_transform_matrices(m, r, out_dtype)
 
-    H = (H + pad_t + pad_b - KH) // HSTR + 1
-    W = (W + pad_l + pad_r - KW) // WSTR + 1
-    nH, nW = (H + m - 1) // m, (W + m - 1) // m
+    H = simplify((H + pad_t + pad_b - KH) // HSTR + 1)
+    W = simplify((W + pad_l + pad_r - KW) // WSTR + 1)
+    nH, nW = simplify((H + m - 1) // m), simplify((W + m - 1) // m)
     P = N * nH * nW
 
-    pad_extra = (nW - 1) * m + alpha - (H + pad_t + pad_b)
+    pad_extra = simplify((nW - 1) * m + alpha - (H + pad_t + pad_b))
     data_pad = pad(
         data, (0, pad_t, pad_l, 0), (0, pad_b + pad_extra, pad_r + pad_extra, 0), name="data_pad"
     )

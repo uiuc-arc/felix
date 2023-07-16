@@ -192,12 +192,13 @@ class DatasetBuilder:
         self.labels.append(label)
         self.conf_meta.append(conf_meta)
 
-    def add_configs_(self, features: list, flops: float, latencies: Tensor):
+    def add_configs_(self, features: list, flops: float, latencies: Tensor, conf_meta: dict):
         labels = self.make_label(flops, latencies)
         for feat_, label_ in zip(features, labels):
             if label_ > 0:
                 self.features.append(feat_)
                 self.labels.append(label_.item())
+                self.conf_meta.append(conf_meta)
 
     def to_dataset(self):
         seg_size = torch.tensor([f.shape[0] for f in self.features])

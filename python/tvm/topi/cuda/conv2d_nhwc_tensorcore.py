@@ -19,21 +19,33 @@
 """Tensorcore template for cuda backend"""
 import numpy as np
 import tvm
-from tvm import te
-from tvm import autotvm
-from ..utils import get_const_tuple, traverse_inline, simplify
+from tvm import autotvm, te
+
 from ..nn.pad import pad
 from ..nn.utils import get_pad_tuple
-from .tensor_intrin import intrin_wmma_load_matrix_A
-from .tensor_intrin import intrin_wmma_load_matrix_W
-from .tensor_intrin import intrin_wmma_store_matrix
-from .tensor_intrin import intrin_wmma_gemm
+from ..utils import get_const_tuple, simplify, traverse_inline
+from .tensor_intrin import (
+    intrin_wmma_gemm,
+    intrin_wmma_load_matrix_A,
+    intrin_wmma_load_matrix_W,
+    intrin_wmma_store_matrix,
+)
 
 
 def nhwc_tensorcore_cuda(cfg, Input, Filter, stride, padding, dilation, out_dtype):
     """Compute declaration for tensorcore"""
     assert isinstance(stride, int) or len(stride) == 2
     assert isinstance(dilation, int) or len(dilation) == 2
+
+    def expr_or_const_true(cond):
+        if isinstance(cond, bool) and cond:
+            return cond
+        assert isinstance(cond, tvm.tir.expr.EqualOp)
+        cond = simplify(cond.asobject())
+        if isinstance(cond, bool) and cond:
+            return cond
+        assert isinstance(cond, tvm.tir.PrimExpr)
+        return True
 
     if isinstance(stride, int):
         stride_h = stride_w = stride
@@ -47,7 +59,7 @@ def nhwc_tensorcore_cuda(cfg, Input, Filter, stride, padding, dilation, out_dtyp
 
     batch, in_height, in_width, in_channel = get_const_tuple(Input.shape)
     kernel_h, kernel_w, _, num_filter = get_const_tuple(Filter.shape)
-    assert (
+    assert expr_or_const_true(
         (batch % 16 == 0 and in_channel % 16 == 0 and num_filter % 16 == 0)
         or (batch % 8 == 0 and in_channel % 16 == 0 and num_filter % 32 == 0)
         or (batch % 32 == 0 and in_channel % 16 == 0 and num_filter % 8 == 0)

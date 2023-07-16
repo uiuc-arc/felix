@@ -295,8 +295,17 @@ class RelayOpBuilder(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, configs: Optional[dict]) -> List[List[sp.Expr]]:
         pass
+
+    def free_vars(self):
+        vars = [
+            attr
+            for attr_group in self.make_attrs(None)
+            for attr in attr_group
+            if isinstance(attr, sp.Symbol)
+        ]
+        return set(vars)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
@@ -342,8 +351,8 @@ class Const(RelayOpBuilder):
             shape = [tir_int(int(dim.subs(config))) for dim in self.dims]
         return te.placeholder(shape=shape, dtype=self.dtype)
 
-    def free_vars(self) -> List[sp.Symbol]:
-        return list(set().union(*[dim.free_symbols for dim in self.dims]))
+    def make_attrs(self, _):
+        return [list(dim.free_symbols) for dim in self.dims]
 
     def __str__(self) -> str:
         return "Const"
@@ -396,7 +405,7 @@ class _GeneralConv(RelayComputeOpBuilder, abc.ABC):
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
-        strides, paddings = self._make_attrs(config)
+        strides, paddings = self.make_attrs(config)
         # Repeat twice as a list; left/right, top/bottom, front/back
         paddings = paddings * 2
         dilation = [1] * self.n_dims
@@ -423,16 +432,12 @@ class _GeneralConv(RelayComputeOpBuilder, abc.ABC):
         for i in range(self.n_dims):
             cons.append((isizes[i], dim_names[i]))
             cons.append((wsizes[i], f"K{dim_names[i]}"))
-        sym_strides, sym_pads = self._make_attrs()
+        sym_strides, sym_pads = self.make_attrs()
         output_shape = conv_like_shape_infer(isizes, wsizes, sym_pads, sym_strides)
         output_shape = [ni, *output_shape, co]
         return output_shape, cons
 
-    def free_vars(self) -> List[sp.Symbol]:
-        strides, paddings = self._make_attrs()
-        return strides + paddings
-
-    def _make_attrs(self, config=None):
+    def make_attrs(self, config=None):
         ds = DIM_NAMES[self.n_dims]
         strides = [self._mog(f"Stride{ds[i]}", config) for i in range(self.n_dims)]
         paddings = [self._mog(f"Pad{ds[i]}", config) for i in range(self.n_dims)]
@@ -449,7 +454,7 @@ class _GeneralConv(RelayComputeOpBuilder, abc.ABC):
         if precision != "float32":
             raise ValueError(f"Unsupported precision {precision}")
         attrs = {}
-        sym_strides, sym_pads = self._make_attrs()
+        sym_strides, sym_pads = self.make_attrs()
         for i in range(dims):
             attrs[sym_strides[i]] = strides[i]
             attrs[sym_pads[i]] = paddings[i]
@@ -544,7 +549,13 @@ class Conv2dTensorCore(_GeneralConv):
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
-        return None
+        strides, paddings = self.make_attrs(config)
+        # Repeat twice as a list; left/right, top/bottom, front/back
+        paddings = paddings * 2
+        dilation = [1] * self.n_dims
+        return topi.cuda.conv2d_nhwc_tensorcore(
+            input, weight, strides, paddings, dilation, "float32"
+        )  # type: ignore
 
     @classmethod
     def try_from_ops(cls, op0, op1, op2, op3):
@@ -566,7 +577,7 @@ class Conv2dTensorCore(_GeneralConv):
         ret = cls(2, 1, False)
         strideh, stridew = strides
         padh, padw = paddings[:2]
-        (sstrideh, sstridew), (spadh, spadw) = ret._make_attrs()
+        (sstrideh, sstridew), (spadh, spadw) = ret.make_attrs()
         attrs = {sstrideh: strideh, sstridew: stridew, spadh: padh, spadw: padw}
         return ret, attrs
 
@@ -578,9 +589,6 @@ class Conv2dTensorCore(_GeneralConv):
 
 
 class Conv2dWinograd(RelayComputeOpBuilder):
-    STRIDE = DILATION = PAD = 1
-    KERNEL_SIZE = 3
-
     @classmethod
     def lookahead(cls) -> int:
         return 8
@@ -595,12 +603,12 @@ class Conv2dWinograd(RelayComputeOpBuilder):
             input,
             weight,
             strides=[1, 1],
-            padding=[self.PAD] * 4,
+            padding=[1, 1, 1, 1],
             dilation=[1, 1],
             out_dtype="float32",
         )  # type: ignore
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     @classmethod
@@ -615,23 +623,18 @@ class Conv2dWinograd(RelayComputeOpBuilder):
         # fmt: on
         if outputs != to_match:
             return None
-        # Winograd algorithm packs its kernel, but regardless,
-        # the kernel must be square.
         pack_kh, pack_kw = ops[4].input_tensors[1].shape[0:2]
-        # pack_hk = tile_size + kernel_size - 1. tile_size is 4 in TVM now
-        # (NOTE: could it be other value in other cases?)
-        if not (pack_kh == pack_kw == 4 + cls.KERNEL_SIZE - 1):
-            return None
-        # Winograd conv must be 1x1 stride.
-        # In the first (padding) op, Winograd (seems to) pad the input to an even number,
-        # so we cannot tell the padding from that,
-        # but since we know the kernel size and stride, we can infer from the output size.
         in_h, in_w = ops[0].input_tensors[0].shape[1:-1]
         out_h, out_w = ops[-1].output(0).shape[1:-1]
-        assert in_h == in_w and out_h == out_w
-        double_pad = out_h - in_h + cls.KERNEL_SIZE - 1
-        # Pad can be different from 1 but we require it to be 1 here.
-        assert double_pad == cls.PAD * 2
+        assert in_h == in_w and out_h == out_w and (out_h - in_h) % 2 == 0
+        size_diff = (out_h - in_h) // 2
+        # 1. Winograd algorithm packs its kernel, but regardless, the kernel must be square.
+        # 2. Winograd conv must be 1x1 stride.
+        # 3. pack_hk = tile_size + kernel_size - 1. tile_size is 4 in TVM now
+        #    (NOTE: could it be other value in other cases?)
+        # 4. Kernel size could otherwise be 1x1 but not supported in TVM yet.
+        if not (pack_kh == pack_kw == 6 and size_diff == 0):
+            return None
         return cls(), {}
 
     def infer_shape(self, input_shapes: List[SymShapeT]):
@@ -639,18 +642,15 @@ class Conv2dWinograd(RelayComputeOpBuilder):
         ni, h, w, ci = input
         # WARNING: Winograd Conv is HWOI not HWIO.
         pack_kh, pack_kw, co_w, ci_w = weight
-        pack_khw = sp.Integer(self.KERNEL_SIZE + 3)
+        pad, pack_khw = 1, 6
         # fmt: off
-        # Packed kernel size is kernel_size + 3, see the comment in try_from_ops.
         cons = [
             (ni, "N"), (ci, "Cin"), (ci_w, "Cin"), (co_w, "Cout"),
             (h / 4, "QHW"), (w / 4, "QHW"),
             (pack_kh, pack_khw), (pack_kw, pack_khw),
         ]
         # fmt: on
-        im_size = h + 2 * self.PAD - 3 + 1
-        output_shape = [ni, im_size, im_size, co_w]
-        return output_shape, cons
+        return [ni, h, h, co_w], cons
 
     def __str__(self) -> str:
         return "Conv2dWinograd"
@@ -669,41 +669,77 @@ class TransposeConv2d(RelayComputeOpBuilder):
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
-        strides, paddings, output_pads = self._make_attrs(config)
-        paddings = paddings * 2
-        # Using cuda specifically because it's different from the general impl
-        return topi.cuda.conv2d_transpose_nchw(
-            input, weight, strides, paddings, "float32", output_pads
+        (sh, sw), (pad_h, pad_w) = self.make_attrs(config)
+        n, h, w, c = input.shape
+        kh, kw, ci, co = weight.shape
+        assert c == ci
+
+        # padding stage
+        bpad_h, bpad_w = kh - 1 - pad_h, kw - 1 - pad_w
+        ipadding = [0, (bpad_h + sh - 1) // sh, (bpad_w + sw - 1) // sw, 0]
+        padded = topi.nn.pad(input, ipadding, ipadding)
+        # remove extra padding introduced by dilatation
+        idx_div = te.indexdiv
+        idx_mod = te.indexmod
+        border_h = idx_mod(sh - idx_mod(bpad_h, sh), sh)
+        border_w = idx_mod(sw - idx_mod(bpad_w, sw), sw)
+
+        # dilation stage
+        strides = [1, sh, sw, 1]
+
+        # We should embed this dilation directly into te.compute rather than creating a new te.compute.
+        # Only in this way can we use unroll to eliminate the multiplication of zeros.
+        def _dilate(*indices):
+            not_zero = []
+            index_tuple = []
+            for i in range(len(padded.shape)):
+                if not strides[i] == 1:
+                    index_tuple.append(idx_div(indices[i], strides[i]))
+                    not_zero.append(idx_mod(indices[i], strides[i]).equal(0))
+                else:
+                    index_tuple.append(indices[i])
+            if not_zero:
+                not_zero = te.all(*not_zero)
+                return te.if_then_else(not_zero, padded(*index_tuple), tir.const(0.0, padded.dtype))
+            return padded(*index_tuple)
+
+        # convolution stage
+        out_h = (h - 1) * sh - 2 * pad_h + kh
+        out_w = (w - 1) * sw - 2 * pad_w + kw
+        rc = te.reduce_axis((0, c), name="rc")
+        rh = te.reduce_axis((0, kh), name="rh")
+        rw = te.reduce_axis((0, kw), name="rw")
+        return te.compute(
+            (n, out_h, out_w, co),
+            lambda n, h, w, co: te.sum(
+                _dilate(n, h + rh + border_h, w + rw + border_w, rc)
+                * weight[kh - 1 - rh, kw - 1 - rw, rc, co],
+                axis=[rh, rw, rc],
+            ),
+            name="conv2d_transpose_nhwc",
         )  # type: ignore
 
     @classmethod
     def try_from_ops(cls, op0: te.ComputeOp, op1: te.ComputeOp):
-        if (strides := detect_deconv_pad_op(op0)) is None:
+        if op1.output(0).name != "conv2d_transpose_nhwc":
             return None
-        if op1.tag != "conv2d_transpose_nchw":
+        if (strides := parse_deconv_stride(op1)) is None:
             return None
-        source = op1.body[0].source[0]
-        if not isinstance(source, tir.Mul):
-            return None
-        if len(strides) != 4:  # Including batch and channel "strides", which should always be 1
-            raise ValueError(f"Invalid strides {strides}")
-        strideh, stridew = strides[2:]
         ishape = op0.input_tensors[0].shape
         kshape = op1.input_tensors[1].shape
         oshape = op1.output(0).shape
-        padh = (ishape[2] - 1) * strideh + kshape[2] - oshape[2]
-        padw = (ishape[3] - 1) * stridew + kshape[3] - oshape[3]
+        # NOTE: input is NHWC and kernel is HWIO
+        padh = (ishape[1] - 1) * strides[0] + kshape[0] - oshape[1]
+        padw = (ishape[2] - 1) * strides[1] + kshape[1] - oshape[2]
         assert padh % 2 == padw % 2 == 0
         padh, padw = padh // 2, padw // 2
         ret = cls()
-        (sym_sh, sym_sw), (sym_ph, sym_pw), _ = ret._make_attrs()
-        attrs = {sym_sh: strideh, sym_sw: stridew, sym_ph: padh, sym_pw: padw}
+        (sym_sh, sym_sw), (sym_ph, sym_pw) = ret.make_attrs()
+        attrs = {sym_sh: strides[0], sym_sw: strides[1], sym_ph: padh, sym_pw: padw}
         return ret, attrs
 
     def infer_shape(self, input_shapes: List[SymShapeT]):
-        input, weight = input_shapes
-        ni, ci, *isizes = input
-        ci_w, co_w, *wsizes = weight
+        (ni, *isizes, ci), (*wsizes, ci_w, co_w) = input_shapes
         # fmt: off
         cons = [
             (ni, "N"), (ci, "Cin"), (ci_w, "Cin"), (co_w, "Cout"),
@@ -711,27 +747,17 @@ class TransposeConv2d(RelayComputeOpBuilder):
             (wsizes[0], "KH"), (wsizes[1], "KW")
         ]
         # fmt: on
-        sym_strides, sym_pads, sym_out_pads = self._make_attrs()
+        sym_strides, sym_pads = self.make_attrs()
         output_shape = [
-            (isizes[i] - 1) * sym_strides[i]
-            - 2 * sym_pads[i]
-            + (wsizes[i] - 1)
-            + sym_out_pads[i]
-            + 1
+            (isizes[i] - 1) * sym_strides[i] - 2 * sym_pads[i] + (wsizes[i] - 1) + 1
             for i in range(2)
         ]
-        output_shape = [ni, co_w, *output_shape]
-        return output_shape, cons
+        return [ni, *output_shape, co_w], cons
 
-    def free_vars(self) -> List[sp.Symbol]:
-        strides, paddings, _ = self._make_attrs()
-        return strides + paddings
-
-    def _make_attrs(self, config=None):
+    def make_attrs(self, config=None):
         strides = [self._mog(f"Stride{s}", config) for s in ("H", "W")]
         paddings = [self._mog(f"Pad{s}", config) for s in ("H", "W")]
-        output_pads = [0, 0]  # Assumptions are made.
-        return strides, paddings, output_pads
+        return strides, paddings
 
     def __str__(self) -> str:
         return "TransposeConv2d"
@@ -744,7 +770,7 @@ class Dense(RelayComputeOpBuilder):
     def lookahead(cls):
         return 1
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     def make_te(
@@ -772,12 +798,12 @@ class Dense(RelayComputeOpBuilder):
     __repr__ = __str__
 
 
-class BatchMatMul(RelayComputeOpBuilder):
+class BatchMatmul(RelayComputeOpBuilder):
     @classmethod
     def lookahead(cls) -> int:
         return 1
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     def make_te(
@@ -788,7 +814,7 @@ class BatchMatMul(RelayComputeOpBuilder):
     @classmethod
     def try_from_ops(cls, op0: te.ComputeOp):
         def get_name(idx):
-            return idx.name if isinstance(idx, tir.SizeVar) else None
+            return idx.name if isinstance(idx, tir.Var) else None
 
         if op0.tag != "batch_matmul":
             return None
@@ -810,7 +836,7 @@ class BatchMatMul(RelayComputeOpBuilder):
         return output_shape, cons
 
     def __str__(self) -> str:
-        return "BatchMatMul"
+        return "BatchMatmul"
 
     __repr__ = __str__
 
@@ -830,7 +856,7 @@ class FixedSizePool(RelayComputeOpBuilder, abc.ABC):
         op = self.OPS[self.n_dims]  # type: ignore
         layout = "".join(DIM_NAMES[self.n_dims])
         layout = f"N{layout}C"
-        strides, pool_sizes, paddings = self._make_attrs(config)
+        strides, pool_sizes, paddings = self.make_attrs(config)
         paddings = paddings * 2  # Padding on both sides.
         dilations = [1] * self.n_dims
         pool_type = "avg" if self.is_avg else "max"
@@ -846,13 +872,13 @@ class FixedSizePool(RelayComputeOpBuilder, abc.ABC):
         cons = [(ni, "N"), (c, "C")]
         for i in range(self.n_dims):
             cons.append((isizes[i], f"In{i}"))
-        strides, pool_sizes, paddings = self._make_attrs()
+        strides, pool_sizes, paddings = self.make_attrs()
         output_shape = conv_like_shape_infer(isizes, pool_sizes, paddings, strides)
         output_shape = [ni, *output_shape, c]
         return output_shape, cons
 
     def _make_attrs_dict(self, strides, kernel_sizes, paddings=None):
-        sym_strides, sym_ksizes, sym_paddings = self._make_attrs()
+        sym_strides, sym_ksizes, sym_paddings = self.make_attrs()
         attrs = {}
         for i in range(len(strides)):
             attrs[sym_strides[i]] = strides[i]
@@ -865,14 +891,7 @@ class FixedSizePool(RelayComputeOpBuilder, abc.ABC):
             assert paddings is None
         return attrs
 
-    def free_vars(self) -> List[sp.Symbol]:
-        strides, kernel_sizes, paddings = self._make_attrs()
-        if self.has_paddings:
-            return strides + kernel_sizes + paddings
-        else:
-            return strides + kernel_sizes
-
-    def _make_attrs(self, config=None):
+    def make_attrs(self, config=None):
         ds = DIM_NAMES[self.n_dims]
         strides = [self._mog(f"Stride{ds[i]}", config) for i in range(self.n_dims)]
         kernel_sizes = [self._mog(f"KSize{i}", config) for i in range(self.n_dims)]
@@ -1003,13 +1022,14 @@ class AdaptiveAvgPool(RelayComputeOpBuilder):
         if len(output_sizes) not in (2, 3):
             return None
         self = cls(len(output_sizes))
-        return self, dict(zip(self._make_attrs(), output_sizes))
+        (osizes,) = self.make_attrs()
+        return self, dict(zip(osizes, output_sizes))
 
     def make_te(
         self, config: Dict[str, Union[int, tir.SizeVar]], input: te.Tensor
     ) -> Optional[te.Tensor]:
         layout = f"N{DIM_NAMES[self.n_dims]}C"
-        osizes = self._make_attrs(config)
+        (osizes,) = self.make_attrs(config)
         if self.n_dims == 2:
             return topi.nn.adaptive_pool(input, osizes, "avg", layout)
         elif self.n_dims == 3:
@@ -1019,15 +1039,12 @@ class AdaptiveAvgPool(RelayComputeOpBuilder):
     def infer_shape(self, input_shapes: List[SymShapeT]):
         (ishape,) = input_shapes
         (n, *_, c) = ishape
-        oshape = self.free_vars()
+        (oshape,) = self.make_attrs()
         idims_name = ["N"] + [f"In{c}" for c in DIM_NAMES[self.n_dims]] + ["C"]
         return [n, *oshape, c], list(zip(ishape, idims_name))
 
-    def free_vars(self) -> List[sp.Symbol]:
-        return self._make_attrs()
-
-    def _make_attrs(self, configs=None):
-        return [self._mog(f"Out{c}", configs) for c in DIM_NAMES[self.n_dims]]
+    def make_attrs(self, config=None):
+        return [[self._mog(f"Out{c}", config) for c in DIM_NAMES[self.n_dims]]]
 
     def __str__(self) -> str:
         return f"AdaptiveAvgPool{self.n_dims}D"
@@ -1045,7 +1062,7 @@ class Softmax(RelayComputeOpBuilder):
     def lookahead(cls) -> int:
         return 4
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     def make_te(
@@ -1089,7 +1106,7 @@ class ConstScalar(RelayComputeOpBuilder):
     def lookahead(cls) -> int:
         return 1
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     def make_te(self, config: Dict[str, Union[int, tir.SizeVar]]) -> Optional[te.Tensor]:
@@ -1127,7 +1144,7 @@ class Mean(RelayComputeOpBuilder):
     def lookahead(cls) -> int:
         return 2
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     @classmethod
@@ -1173,7 +1190,7 @@ class Elemwise(RelayComputeOpBuilder):
     def lookahead(cls) -> int:
         return 1
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     @classmethod
@@ -1287,7 +1304,7 @@ class Broadcast(RelayComputeOpBuilder):
             return op(lhs, rhs)
         raise ValueError(f"Unsupported number of args {len(args)}")
 
-    def free_vars(self) -> List[sp.Symbol]:
+    def make_attrs(self, _):
         return []
 
     @classmethod
@@ -1374,7 +1391,7 @@ class Broadcast(RelayComputeOpBuilder):
 # fmt: off
 RELAY_BUILDERS: List[Type[RelayComputeOpBuilder]] = [
     Conv, DepthwiseConv2d, GroupConv2d, TransposeConv2d, Conv2dTensorCore, Conv2dWinograd,
-    Dense, BatchMatMul,
+    Dense, BatchMatmul,
     # OneOPPool, TwoOPsPool, ThreeOPsPool are just used as parsers
     # and do not return instances of themselves.
     # trunk-ignore(mypy/type-abstract)
@@ -1477,6 +1494,22 @@ def parse_conv_stride_group(op: te.ComputeOp):
     hw_idxs, ch_idx = pad_input_idxs[1:-1], pad_input_idxs[-1]
     strides = [parse_add_mul(i) for i in hw_idxs]
     return strides, parse_add_mul(ch_idx)
+
+
+def parse_deconv_stride(op: te.ComputeOp):
+    def parse_add_div(x):
+        if isinstance(x, tir.FloorDiv):
+            assert isinstance(x.b, tir.IntImm)
+            return x.b.value
+        return 1
+
+    if not isinstance((src0 := op.body[0].source[0]), tir.Mul):
+        return None
+    if not isinstance((lhs := src0.a), tir.Call):
+        return None
+    pad_input_idxs = lhs.args[1].indices
+    hw_idxs = pad_input_idxs[1:-1]
+    return [parse_add_div(i) for i in hw_idxs]
 
 
 def conv_like_shape_infer(isizes, wsizes, paddings, strides):
