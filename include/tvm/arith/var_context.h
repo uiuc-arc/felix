@@ -125,7 +125,7 @@ class VarContextNode : public Object {
     v->Visit("var_defs", &this->var_defs);
   }
 
-  Array<tir::SizeVar> GetSplitVars(const PrimExpr& extent, size_t n_splits, bool whole_div);
+  Array<tir::SizeVar> GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div);
   std::pair<PrimExpr, PrimExpr> GetSplitSizes(const PrimExpr& extent, PrimExpr factor,
                                               bool no_tighten_factor);
   PrimExpr DefineConstShorthand(PrimExpr expr) {

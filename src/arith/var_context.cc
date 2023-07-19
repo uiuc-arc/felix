@@ -153,8 +153,7 @@ inline std::pair<PrimExpr, PrimExpr> ConservativeDiv(PrimExpr extent, PrimExpr f
   return std::make_pair(min_factor, divided);
 }
 
-Array<SizeVar> VarContextNode::GetSplitVars(const PrimExpr& extent, size_t n_splits,
-                                            bool whole_div) {
+Array<SizeVar> VarContextNode::GetSplitVars(PrimExpr extent, size_t n_splits, bool whole_div) {
   std::string group_idx = std::to_string(this->split_counter++);
   Array<SizeVar> vars;
   Array<String> var_names;
@@ -170,6 +169,7 @@ Array<SizeVar> VarContextNode::GetSplitVars(const PrimExpr& extent, size_t n_spl
     // No need to add a SplitGroup if not whole_div.
     return vars;
   }
+  extent = SimplifyExpr(extent);
   // Don't put non-const extents in the map. They can contain loop variables that are removed in
   // later transformation steps, and we can't keep track of that.
   ICHECK(ExprIsShapeConstant(extent));
@@ -207,6 +207,7 @@ std::pair<PrimExpr, PrimExpr> VarContextNode::GetSplitSizes(const PrimExpr& exte
 
 std::pair<PrimExpr, PrimExpr> VarContextNode::SymbolicDiv(PrimExpr numer, PrimExpr denom,
                                                           bool no_tighten_factor) {
+  numer = SimplifyExpr(numer), denom = SimplifyExpr(denom);
   PrimExpr simpl = SimplifyExpr(numer / denom);
   if (!HasDiv(simpl)) {
     return {denom, simpl};
