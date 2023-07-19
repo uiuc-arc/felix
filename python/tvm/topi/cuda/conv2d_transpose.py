@@ -17,8 +17,10 @@
 # pylint: disable=invalid-name
 """Conv2d transpose template for cuda backend"""
 
+from typing import Tuple
+
 import tvm
-from tvm import autotvm, te
+from tvm import autotvm, te, tir
 from tvm.autotvm.task.space import OtherOptionEntity, SplitEntity
 from tvm.contrib import cudnn
 
@@ -122,6 +124,93 @@ def conv2d_transpose_nchw(cfg, data, kernel, stride, padding, out_dtype, output_
     )
 
     return data_out
+
+
+@autotvm.register_topi_compute("conv2d_transpose_nhwc.cuda")
+def conv2d_transpose_nhwc(  # pylint: disable=invalid-name,missing-docstring
+    cfg,
+    data,
+    kernel,
+    stride,
+    padding,
+    out_dtype,
+    output_padding,
+) -> Tuple[te.Tensor, te.Tensor, te.Tensor]:
+    if out_dtype != "float32":
+        raise ValueError("Only float32 is supported for conv2d_transpose_nhwc")
+    if not all(x == 0 for x in output_padding):
+        raise ValueError("output_padding is not supported for conv2d_transpose_nhwc")
+
+    batch, in_h, in_w, in_c = data.shape
+    filter_h, filter_w, in_c, out_c = kernel.shape
+    stride_h, stride_w = stride
+    fpad_top, fpad_left, fpad_bottom, fpad_right = nn.get_pad_tuple(padding, stride)
+
+    # compute padding
+    bpad_top = filter_h - 1 - fpad_top
+    bpad_bottom = filter_h - 1 - fpad_bottom
+    bpad_left = filter_w - 1 - fpad_left
+    bpad_right = filter_w - 1 - fpad_right
+
+    # padding stage
+    padded = nn.pad(
+        data,
+        [
+            0,
+            (bpad_top + stride_h - 1) // stride_h,
+            (bpad_left + stride_w - 1) // stride_w,
+            0,
+        ],
+        [
+            0,
+            (bpad_bottom + stride_h - 1) // stride_h,
+            (bpad_right + stride_w - 1) // stride_w,
+            0,
+        ],
+    )
+
+    # remove extra padding introduced by dilatation
+    idx_div = te.indexdiv
+    idx_mod = te.indexmod
+    border_h = idx_mod(stride_h - idx_mod(bpad_top, stride_h), stride_h)
+    border_w = idx_mod(stride_w - idx_mod(bpad_left, stride_w), stride_w)
+
+    # dilation stage
+    strides = [1, stride_h, stride_w, 1]
+    n = len(padded.shape)
+
+    # We should embed this dilation directly into te.compute rather than creating a new te.compute.
+    # Only in this way can we use unroll to eliminate the multiplication of zeros.
+    def _dilate(*indices):
+        not_zero = []
+        index_tuple = []
+        for i in range(n):
+            if not strides[i] == 1:
+                index_tuple.append(idx_div(indices[i], strides[i]))
+                not_zero.append(idx_mod(indices[i], strides[i]).equal(0))
+            else:
+                index_tuple.append(indices[i])
+        if not_zero:
+            not_zero = te.all(*not_zero)
+            return te.if_then_else(not_zero, padded(*index_tuple), tir.const(0.0, padded.dtype))
+        return padded(*index_tuple)
+
+    # convolution stage
+    out_h = (in_h - 1) * stride_h - fpad_top - fpad_bottom + filter_h
+    out_w = (in_w - 1) * stride_w - fpad_left - fpad_right + filter_w
+    rc = te.reduce_axis((0, in_c), name="rc")
+    rh = te.reduce_axis((0, filter_h), name="rh")
+    rw = te.reduce_axis((0, filter_w), name="rw")
+
+    return te.compute(
+        (batch, out_h, out_w, out_c),
+        lambda n, h, w, co: te.sum(
+            _dilate(n, h + rh + border_h, w + rw + border_w, rc)
+            * kernel[filter_h - 1 - rh, filter_w - 1 - rw, rc, co],
+            axis=[rh, rw, rc],
+        ),
+        name="conv2d_transpose_nhwc",
+    )
 
 
 @autotvm.register_topi_schedule("conv2d_transpose_nchw.cuda")

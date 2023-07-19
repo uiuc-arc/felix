@@ -669,54 +669,10 @@ class TransposeConv2d(RelayComputeOpBuilder):
         input: te.Tensor,
         weight: te.Tensor,
     ) -> Optional[te.Tensor]:
-        (sh, sw), (pad_h, pad_w) = self.make_attrs(config)
-        n, h, w, c = input.shape
-        kh, kw, ci, co = weight.shape
-        assert c == ci
-
-        # padding stage
-        bpad_h, bpad_w = kh - 1 - pad_h, kw - 1 - pad_w
-        ipadding = [0, (bpad_h + sh - 1) // sh, (bpad_w + sw - 1) // sw, 0]
-        padded = topi.nn.pad(input, ipadding, ipadding)
-        # remove extra padding introduced by dilatation
-        idx_div = te.indexdiv
-        idx_mod = te.indexmod
-        border_h = idx_mod(sh - idx_mod(bpad_h, sh), sh)
-        border_w = idx_mod(sw - idx_mod(bpad_w, sw), sw)
-
-        # dilation stage
-        strides = [1, sh, sw, 1]
-
-        # We should embed this dilation directly into te.compute rather than creating a new te.compute.
-        # Only in this way can we use unroll to eliminate the multiplication of zeros.
-        def _dilate(*indices):
-            not_zero = []
-            index_tuple = []
-            for i in range(len(padded.shape)):
-                if not strides[i] == 1:
-                    index_tuple.append(idx_div(indices[i], strides[i]))
-                    not_zero.append(idx_mod(indices[i], strides[i]).equal(0))
-                else:
-                    index_tuple.append(indices[i])
-            if not_zero:
-                not_zero = te.all(*not_zero)
-                return te.if_then_else(not_zero, padded(*index_tuple), tir.const(0.0, padded.dtype))
-            return padded(*index_tuple)
-
-        # convolution stage
-        out_h = (h - 1) * sh - 2 * pad_h + kh
-        out_w = (w - 1) * sw - 2 * pad_w + kw
-        rc = te.reduce_axis((0, c), name="rc")
-        rh = te.reduce_axis((0, kh), name="rh")
-        rw = te.reduce_axis((0, kw), name="rw")
-        return te.compute(
-            (n, out_h, out_w, co),
-            lambda n, h, w, co: te.sum(
-                _dilate(n, h + rh + border_h, w + rw + border_w, rc)
-                * weight[kh - 1 - rh, kw - 1 - rw, rc, co],
-                axis=[rh, rw, rc],
-            ),
-            name="conv2d_transpose_nhwc",
+        strides, paddings = self.make_attrs(config)
+        # Padding is a list of half-paddings and we repeat it twice
+        return topi.cuda.conv2d_transpose_nhwc(
+            input, weight, strides, paddings * 2, "float32", [0, 0, 0, 0]
         )  # type: ignore
 
     @classmethod
@@ -1505,9 +1461,12 @@ def parse_deconv_stride(op: te.ComputeOp):
 
     if not isinstance((src0 := op.body[0].source[0]), tir.Mul):
         return None
-    if not isinstance((lhs := src0.a), tir.Call):
+    if isinstance((lhs := src0.a), tir.Call):
+        pad_input_idxs = lhs.args[1].indices
+    elif isinstance((lhs := src0.a), tir.ProducerLoad):
+        pad_input_idxs = lhs.indices
+    else:
         return None
-    pad_input_idxs = lhs.args[1].indices
     hw_idxs = pad_input_idxs[1:-1]
     return [parse_add_div(i) for i in hw_idxs]
 

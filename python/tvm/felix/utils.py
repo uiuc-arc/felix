@@ -195,12 +195,13 @@ def _convert_to_nhwc(mod):
             "nn.conv3d": ["NDHWC", "default"],
             "nn.max_pool3d": ["NDHWC", "default"],
             "nn.adaptive_avg_pool3d": ["NDHWC", "default"],
+            "nn.conv2d_transpose": ["NHWC", "default"],
             "qnn.conv2d": ["NHWC", "default"],
-            # NCHW for transpose conv.
-            "nn.conv2d_transpose": ["NCHW", "default"],
         },
     )
-    seq = transform.Sequential([relay.transform.RemoveUnusedFunctions(), converter])
+    seq = transform.Sequential(
+        [relay.transform.RemoveUnusedFunctions(), converter, relay.transform.FoldConstant()]
+    )
     with transform.PassContext(opt_level=3):
         mod = seq(mod)
     return mod

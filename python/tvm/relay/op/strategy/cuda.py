@@ -594,14 +594,6 @@ def conv2d_transpose_strategy_cuda(attrs, inputs, out_type, target):
     strategy = _op.OpStrategy()
     num_strategies = 0
 
-    if layout == "NCHW":
-        strategy.add_implementation(
-            wrap_compute_conv2d_transpose(topi.cuda.conv2d_transpose_nchw),
-            wrap_topi_schedule(topi.cuda.schedule_conv2d_transpose_nchw),
-            name="conv2d_transpose_nchw.cuda",
-        )
-        num_strategies += 1
-
     if (
         target.kind.name == "cuda"
         and "cudnn" in target.libs
@@ -617,8 +609,21 @@ def conv2d_transpose_strategy_cuda(attrs, inputs, out_type, target):
             plevel=25,
         )
         num_strategies += 1
-
-    # TODO(masahi): Support conv2d_transpose NHWC for non-cudnn path.
+    if layout == "NCHW":
+        strategy.add_implementation(
+            wrap_compute_conv2d_transpose(topi.cuda.conv2d_transpose_nchw),
+            wrap_topi_schedule(topi.cuda.schedule_conv2d_transpose_nchw),
+            name="conv2d_transpose_nchw.cuda",
+        )
+        num_strategies += 1
+    if layout == "NHWC" and is_auto_scheduler_enabled():
+        # This should never be picked by autotvm
+        strategy.add_implementation(
+            wrap_compute_conv2d_transpose(topi.cuda.conv2d_transpose_nhwc),
+            naive_schedule,
+            name="conv2d_transpose_nhwc.cuda",
+        )
+        num_strategies += 1
     assert num_strategies > 0, "Unsupported conv2d_transpose workload, layout = %s" % layout
     return strategy
 

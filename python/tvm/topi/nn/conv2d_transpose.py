@@ -306,26 +306,13 @@ def conv2d_transpose_legalize(attrs, inputs, types):
         # cuDNN backend can directly operate on NHWC layout.
         return None
 
+    new_attrs = {k: attrs[k] for k in attrs.keys()}
     if attrs["data_layout"] == "NHWC":
-        kernel = layout_transform(kernel, kernel_layout, "IOHW")
-
-        # Set new attrs for conv2d_transpose.
-        new_attrs = {k: attrs[k] for k in attrs.keys()}
-        new_attrs["data_layout"] = "NCHW"
-        # layout of kernel should be IOHW, but kernel_layout will be swapped - OIHW
-        new_attrs["kernel_layout"] = "IOHW"
-
-        # Convert data to NCHW.
-        data = relay.transpose(data, axes=(0, 3, 1, 2))
-        deconv = relay.nn.conv2d_transpose(data, kernel, **new_attrs)
-        # Convert back to original NHWC layout.
-        out = relay.transpose(deconv, axes=(0, 2, 3, 1))
-        return out
-
+        kernel = layout_transform(kernel, kernel_layout, "HWIO")
+        new_attrs["kernel_layout"] = "HWIO"
+        return relay.nn.conv2d_transpose(data, kernel, **new_attrs)
     if attrs["data_layout"] == "NCHW":
         kernel = layout_transform(kernel, kernel_layout, "IOHW")
-        new_attrs = {k: attrs[k] for k in attrs.keys()}
-
         # layout of kernel should be IOHW, but kernel_layout will be swapped - OIHW
         new_attrs["kernel_layout"] = "IOHW"
         return relay.nn.conv2d_transpose(data, kernel, **new_attrs)
