@@ -337,13 +337,10 @@ class ConfigInfo:
 
 
 class TaskPerfFunc(nn.Module):
-    def __init__(
-        self, task: SymTask, sizes: Dict[str, int], weight: int, perf_model: MLPCostModel
-    ) -> None:
+    def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPCostModel) -> None:
         super().__init__()
         self.sym_task = task
         self.sizes = sizes
-        self.weight = weight
         self.ansor_task, self.ansor_policy = task.make_concrete_task(sizes)
         sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
         self._sketches = nn.ModuleList(sketches)
@@ -370,7 +367,9 @@ class TaskPerfFunc(nn.Module):
     def rand_configs(self, n: int) -> List[Tensor]:
         return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
 
-    def get_best_configs(self, configs: List[Tensor], remove_invalid: bool = True):
+    def get_best_configs(
+        self, configs: List[Tensor], remove_invalid: bool = True, dedup_set: Optional[set] = None
+    ):
         """For each config, get its best version across all sketches.
 
         `configs` is a list of configs and should have the same length as
@@ -382,7 +381,7 @@ class TaskPerfFunc(nn.Module):
         perfs, constraints = self.forward(configs)
         max_perfs, best_sketch_ids = perfs.max(dim=0)
         ret: List[ConfigInfo] = []
-        configs_set = set()
+        dedup_set = dedup_set or set()
         for idx, sketch in enumerate(self.sketches):
             configs_ = configs[idx]
             nan_or_inf = torch.any(torch.isnan(configs_) | torch.isinf(configs_), dim=1)
@@ -395,10 +394,10 @@ class TaskPerfFunc(nn.Module):
             for conf_i in torch.nonzero(sketch_mask).squeeze(1):
                 config_dict = sketch.features.inv_transform_config(configs_[conf_i])
                 config_kvs = tuple(sorted(config_dict.items(), key=lambda x: x[0]))
-                if config_kvs in configs_set:
+                if config_kvs in dedup_set:
                     n_dup += 1
                     continue
-                configs_set.add(config_kvs)
+                dedup_set.add(config_kvs)
                 perf = max_perfs[conf_i].item()
                 if self.is_throughput:
                     perf = LatAndThruput.from_thruput(self.flops, perf)
@@ -425,8 +424,7 @@ class TaskPerfFunc(nn.Module):
 
     def __repr__(self) -> str:
         return (
-            f"TaskLatFunc({self.task}, sizes={self.sizes}, weight={self.weight}, "
-            f"sketches={len(self._sketches)})"
+            f"TaskLatFunc({self.sym_task}, sizes={self.sizes}," f"sketches={len(self._sketches)})"
         )
 
     __str__ = __repr__

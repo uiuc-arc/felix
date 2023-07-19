@@ -32,14 +32,12 @@ class AnsorMLPModel(PythonBasedModel):
     def __init__(self, model_path: str) -> None:
         super().__init__()
         checkpoint = torch.load(model_path, map_location="cpu")
-        lf = checkpoint["hyper_parameters"]["loss_func"]
+        self.loss_func = lf = checkpoint["hyper_parameters"]["loss_func"]
         n_feats = checkpoint["hyper_parameters"]["n_features"]
         self.model = MLPCostModel(n_feats, 256, lf == "log_mse", lf != "rank")
-        self.loss_f = MLPLossFunc(lf)
-        self.optim = torch.optim.Adam(self.model.parameters(), lr=7e-4, weight_decay=1e-6)
         self.model.load_state_dict(checkpoint["state_dict"])
         self.model = self.model.eval().cuda()
-        self.dataset = DatasetBuilder()
+        self.data_builder = DatasetBuilder()
 
     def update(self, inputs, results):
         keys = set(input_.task.workload_key for input_ in inputs)
@@ -52,51 +50,16 @@ class AnsorMLPModel(PythonBasedModel):
         features = ft.get_per_store_features_from_states(states, task)
         features = [torch.from_numpy(st_feats.astype(float)).float() for st_feats in features]
         lats = torch.tensor([[float(x) for x in res.costs] for res in results]).mean(dim=1)
-        self.dataset.add_configs_(features, flops, lats)
-
-        # pred = self.model.forward_on_batch(features, False)
-        # loss = self.loss_f(pred, thruputs)
-        # self.optim.zero_grad()
-        # loss.backward()
-        # self.optim.step()
-
-        print_per_epoches = 5
-        n_epoch = 30
-        early_stop = 5
-        lr = 7e-4
-        wd = 1e-6
-        grad_clip = 0.5
-        batch_size = 512
-
-        self.model.train()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=wd)
-        best_train_loss, best_epoch = 1e10, 0
-        dataset = self.dataset.to_dataset()
-        dataloader = BatchLoadingDataLoader(dataset, batch_size, shuffle=True)
-        logger.info("Dataset size: %d (%d batches)", len(dataset), len(dataloader))
-        for epoch in range(n_epoch):
-            epoch_loss = 0.0
-            for segment_sizes, features, labels, _ in dataloader:
-                segment_sizes = segment_sizes.cuda()
-                features = features.cuda()
-                labels = labels.cuda()
-                optimizer.zero_grad()
-                loss = self.loss_f(
-                    self.model.forward_in_segments(segment_sizes, features, False), labels
-                )
-                loss.backward()
-                optimizer.step()
-                epoch_loss = moving_average(epoch_loss, loss.item())
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)  # type: ignore
-            if epoch % print_per_epoches == 0 or epoch == n_epoch - 1:
-                logger.info("Epoch: %d\tEpoch train Loss: %.4f", epoch, epoch_loss)
-            # Early stop
-            if epoch_loss < best_train_loss:
-                best_train_loss = epoch_loss
-                best_epoch = epoch
-            elif epoch - best_epoch >= early_stop:
-                logger.info("Early stop. Current epoch: %d; best epoch: %d", epoch, best_epoch)
-                break
+        self.data_builder.add_configs_(features, flops, lats)
+        self.model.train_self(
+            self.data_builder.to_dataset(),
+            self.loss_func,
+            lr=7e-4,
+            weight_decay=1e-6,
+            batch_size=512,
+            n_epoch=30,
+            early_stop=5,
+        )
 
     def predict(self, task, states: List[State]) -> List[float]:
         # `features`` is a sequence of np.ndarray each with [n_buf, n_feature(=154)]
@@ -177,6 +140,48 @@ class MLPCostModel(nn.Module):
         if self.output_log and inference:
             output = torch.exp(output)
         return output
+
+    def train_self(
+        self,
+        dataset: "SegmentDataset",
+        loss_func: str,
+        lr: float,
+        weight_decay: float,
+        batch_size: int,
+        n_epoch: int,
+        early_stop: int,
+        grad_clip: float = 0.5,
+        print_per_epoches: int = 5,
+    ):
+        best_train_loss, best_epoch = 1e10, 0
+        original_device = self.device
+        self.train().cuda()
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
+        dataloader = BatchLoadingDataLoader(dataset, batch_size, shuffle=True)
+        loss_f = MLPLossFunc(loss_func)
+        logger.info("Dataset size: %d (%d batches)", len(dataset), len(dataloader))
+        for epoch in range(n_epoch):
+            epoch_loss = 0.0
+            for segment_sizes, features, labels, _ in dataloader:
+                segment_sizes = segment_sizes.cuda()
+                features = features.cuda()
+                labels = labels.cuda()
+                optimizer.zero_grad()
+                loss = loss_f(self.forward_in_segments(segment_sizes, features, False), labels)
+                loss.backward()
+                optimizer.step()
+                epoch_loss = moving_average(epoch_loss, loss.item())
+                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)  # type: ignore
+            if epoch % print_per_epoches == 0 or epoch == n_epoch - 1:
+                logger.info("Epoch: %d\tEpoch train Loss: %.4f", epoch, epoch_loss)
+            # Early stop
+            if epoch_loss < best_train_loss:
+                best_train_loss = epoch_loss
+                best_epoch = epoch
+            elif epoch - best_epoch >= early_stop:
+                logger.info("Early stop. Current epoch: %d; best epoch: %d", epoch, best_epoch)
+                break
+        self.eval().to(original_device)
 
 
 class DatasetBuilder:
