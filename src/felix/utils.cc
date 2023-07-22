@@ -1,5 +1,6 @@
 #include "utils.h"
 
+#include <tvm/auto_scheduler/empty_policy.h>
 #include <tvm/auto_scheduler/search_policy_utils.h>
 #include <tvm/auto_scheduler/search_task.h>
 #include <tvm/driver/driver_api.h>
@@ -266,9 +267,11 @@ TVM_REGISTER_GLOBAL("felix.StateFromConfig")
     });
 
 TVM_REGISTER_GLOBAL("felix.MeasurePerformance")
-    .set_body_typed([](const SearchPolicy& policy, const ProgramMeasurer& measurer,
-                       const Array<MeasureInput>& mis) {
-      auto results = measurer->Measure(policy->search_task, policy, mis);
+    .set_body_typed([](const ProgramMeasurer& measurer, const Array<MeasureInput>& mis) {
+      ICHECK(mis.size() > 0);
+      auto any_task = mis[0]->task;
+      SearchPolicy policy = EmptyPolicy(any_task, Optional<Array<SearchCallback>>());
+      auto results = measurer->Measure(any_task, policy, mis);
       ICHECK(results.size() == mis.size());
       return results;
     });

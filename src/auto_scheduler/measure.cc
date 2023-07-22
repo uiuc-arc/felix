@@ -22,14 +22,13 @@
  * \brief Distributed measurement infrastructure to measure the runtime costs of tensor programs.
  */
 
+#include <tvm/auto_scheduler/empty_policy.h>
 #include <tvm/auto_scheduler/measure.h>
 #include <tvm/auto_scheduler/sketch_policy.h>
 #include <tvm/auto_scheduler/utils.h>
 #include <tvm/runtime/registry.h>
 
 #include <algorithm>
-
-#include "search_policy/empty_policy.h"
 
 namespace tvm {
 namespace auto_scheduler {

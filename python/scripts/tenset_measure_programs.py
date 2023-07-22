@@ -136,7 +136,6 @@ def remeasure_file(taskr: TaskRecord, skip_existing: bool, prefilter=None):
     if len(inputs) == 0:
         logger.info("No configs left, skipping.")
         return
-    empty_policy = ansor.search_policy.EmptyPolicy(taskr.ansor_task)
     # Do measurement
     logger.info("Started measuring %d configs", len(inputs))
     bs = MEASURE_BATCH_SIZE
@@ -144,16 +143,17 @@ def remeasure_file(taskr: TaskRecord, skip_existing: bool, prefilter=None):
         to = from_ + bs
         states = [inp.state for inp in inputs[from_:to]]
         to = min(to, len(inputs))
-        results = ffi.measure_state_performance(empty_policy, measurer, states)
+        mis = [ansor.MeasureInput(taskr.ansor_task, state) for state in states]
+        results = ffi.measure_performance(measurer, mis)
         n_failed = 0
         for result in results:
             if result.error_no != 0:
                 n_failed += 1
-                tqdm.write(f"Error: {result.error_no} {result.error_msg}")
+                logger.info(f"Error: {result.error_no} {result.error_msg}")
                 continue
             flops = taskr.ansor_task.compute_dag.flop_ct
             gflops_sec = [flops / 1e9 / t for t in result.costs]
-            tqdm.write(f"{gflops_sec}")
+            logger.info(f"{gflops_sec}")
         logger.info(f"{n_failed} failed out of {len(states)} in batch {from_ // bs}")
     logger.info("Measurement finished for task.")
 

@@ -12,7 +12,14 @@ from tvm.auto_scheduler.cost_model import DatasetBuilder
 from tvm.felix.sym_task import TaskPerfFunc
 
 from .cost_model import MLPModelPLWrapper
-from .sym_task import ConfigInfo, SymTask, TaskInstance, TaskPerfFunc, print_perf
+from .sym_task import (
+    ConfigInfo,
+    SymTask,
+    TaskInstance,
+    TaskPerfFunc,
+    measure_configs_latency_,
+    print_perf,
+)
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Optimizer"]
@@ -48,18 +55,15 @@ class Optimizer:
                     optimizer.optimize_step()
                 configs = optimizer.get_best_configs()
             _logger.info("Measuring latency of best configs empirically...")
-            with self.timer.time(f"measure[{idx}]"):
-                mcs = optimizer.task_f.measure_configs_latency_(configs[:n_measurements])
             assert idx not in results
             results[idx] = configs
-            best_actual, best_pred = get_best_configs(mcs)
-            _logger.info(
-                f"Task {idx}: best measured {print_perf(best_actual, weight)}, "
-                f"best predicted {print_perf(best_pred, weight)}"
-            )
-            # Print only measured configs one by one.
-            print_each_config(weight, mcs)
+            best_pred_perf = max([c.pred_perf for c in configs], default=None)
+            _logger.info(f"Task {idx}: best predicted {print_perf(best_pred_perf, weight)}")
+        to_measure = [c for task_idx in self.tasks for c in results[task_idx][:n_measurements]]
+        with self.timer.time(f"measure"):
+            measure_configs_latency_(to_measure)
         self._summarize(results, log_file)
+        return results
 
     def tune_multi_rounds(
         self,
@@ -108,7 +112,6 @@ class Optimizer:
             with open(log_file, "w") as f:
                 f.writelines(output_json_lines)
         _logger.info("Total latency: %.2f us", total_lat)
-        self.timer.log_all()
 
     def _do_one_task_one_round(
         self,
@@ -242,8 +245,7 @@ class MultiRoundTaskOptimizer(TaskOptimizer):
     def measure_for_dataset(self, n_top: int, n_rand: int, builder: DatasetBuilder):
         cis: List[ConfigInfo] = self.get_best_configs()
         rand_indices = (torch.randperm(len(cis) - n_top)[:n_rand] + n_top).tolist()
-        cis = cis[:n_top] + [cis[i] for i in rand_indices]
-        cis = self.task_f.measure_configs_latency_(cis)
+        cis = measure_configs_latency_(cis[:n_top] + [cis[i] for i in rand_indices])
         configs_by_sketch = defaultdict(list)
         for ci in cis:
             perf = ci.get_measured_perf()

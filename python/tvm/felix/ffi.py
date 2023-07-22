@@ -5,9 +5,9 @@ import tvm
 from tvm import auto_scheduler as ansor
 from tvm import tir
 from tvm.arith import _ffi_api as _arith
-from tvm.auto_scheduler import _ffi_api as _ansor
 from tvm.auto_scheduler.loop_state import StateObject
-from tvm.auto_scheduler.search_policy import SearchPolicy, SketchPolicy
+from tvm.auto_scheduler.measure import ProgramMeasurer
+from tvm.auto_scheduler.search_policy import SketchPolicy
 from tvm.felix import _ffi_api as _felix
 from tvm.tir import _ffi_api as _tir
 
@@ -114,18 +114,7 @@ def state_from_config(
     return _felix.StateFromConfig(con_task, steps, config)
 
 
-def measure_state_performance(
-    policy: SearchPolicy,
-    measurer: ansor.measure.ProgramMeasurer,
-    states: List[StateObject],
+def measure_performance(
+    measurer: ProgramMeasurer, mis: List[ansor.MeasureInput]
 ) -> List[ansor.MeasureResult]:
-    mis = [ansor.MeasureInput(policy.search_task, state) for state in states]
-    return _felix.MeasurePerformance(policy, measurer, mis)
-
-
-def measure_mis_performance(
-    policy: SearchPolicy,
-    measurer: ansor.measure.ProgramMeasurer,
-    mis: List[ansor.MeasureInput],
-) -> List[ansor.measure.MeasureResult]:
-    return _felix.MeasurePerformance(policy, measurer, mis)
+    return _felix.MeasurePerformance(measurer, mis)

@@ -23,8 +23,7 @@
  * (state).
  */
 
-#include "empty_policy.h"
-
+#include <tvm/auto_scheduler/empty_policy.h>
 #include <tvm/auto_scheduler/measure.h>
 #include <tvm/auto_scheduler/search_policy_utils.h>
 #include <tvm/runtime/registry.h>

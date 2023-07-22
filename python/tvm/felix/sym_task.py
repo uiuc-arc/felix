@@ -29,6 +29,7 @@ __all__ = [
     "extract_tasks",
     "load_and_register_tasks",
     "extract_tenset_pickle_tasks",
+    "measure_configs_latency_",
 ]
 
 
@@ -336,12 +337,24 @@ class ConfigInfo:
         return dump_record_to_string(self.get_measure_input(), mres)
 
 
+def measure_configs_latency_(configs: List[ConfigInfo]):
+    from tvm.auto_scheduler.measure import ProgramMeasurer
+
+    measurer = ProgramMeasurer(ansor.LocalBuilder(), utils.MEASURER, [], False)
+    results = ffi.measure_performance(measurer, [c.get_measure_input() for c in configs])
+    for c, result in zip(configs, results):
+        if result.error_no != 0:
+            _logger.warning(result.error_msg)
+        c.measure_result = result
+    return configs
+
+
 class TaskPerfFunc(nn.Module):
     def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPCostModel) -> None:
         super().__init__()
         self.sym_task = task
         self.sizes = sizes
-        self.ansor_task, self.ansor_policy = task.make_concrete_task(sizes)
+        self.ansor_task, _ = task.make_concrete_task(sizes)
         sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
         self._sketches = nn.ModuleList(sketches)
         self.is_throughput = perf_model.is_throughput
@@ -408,19 +421,6 @@ class TaskPerfFunc(nn.Module):
             f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
         )
         return sorted(ret, key=lambda x: x.pred_perf, reverse=True)
-
-    def measure_configs_latency_(self, configs: List[ConfigInfo]):
-        from tvm.auto_scheduler.measure import ProgramMeasurer
-
-        measurer = ProgramMeasurer(ansor.LocalBuilder(), utils.MEASURER, [], False)
-        results = ffi.measure_mis_performance(
-            self.ansor_policy, measurer, [c.get_measure_input() for c in configs]
-        )
-        for c, result in zip(configs, results):
-            if result.error_no != 0:
-                _logger.warning(result.error_msg)
-            c.measure_result = result
-        return configs
 
     def __repr__(self) -> str:
         return (
