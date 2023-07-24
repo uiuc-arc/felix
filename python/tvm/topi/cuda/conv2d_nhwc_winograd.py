@@ -20,15 +20,17 @@
 """Winograd template for cuda backend"""
 
 import tvm
-from tvm import te
-from tvm import autotvm
+from tvm import autotvm, te
+
 from .. import nn
-from ..utils import get_const_int, get_const_tuple, traverse_inline
 from ..nn.winograd_util import winograd_transform_matrices
-from .tensor_intrin import intrin_wmma_load_matrix_A
-from .tensor_intrin import intrin_wmma_load_matrix_W
-from .tensor_intrin import intrin_wmma_store_matrix
-from .tensor_intrin import intrin_wmma_gemm
+from ..utils import get_const_int, get_const_tuple, traverse_inline
+from .tensor_intrin import (
+    intrin_wmma_gemm,
+    intrin_wmma_load_matrix_A,
+    intrin_wmma_load_matrix_W,
+    intrin_wmma_store_matrix,
+)
 
 
 def _infer_tile_size(data, kernel):
@@ -422,12 +424,12 @@ def nhwc_winograd_cuda(
     )
 
     # Inverse transform
-    r_a = te.reduce_axis((0, alpha), "r_a")
-    r_b = te.reduce_axis((0, alpha), "r_a")
+    r_i = te.reduce_axis((0, alpha), "r_i")
+    r_j = te.reduce_axis((0, alpha), "r_j")
     inverse = te.compute(
         (P, CO, m, m),
         lambda p, co, vh, vw: te.sum(
-            bgemm[r_a][r_b][p][co] * A[r_a][vh] * A[r_b][vw], axis=[r_a, r_b]
+            bgemm[r_i][r_j][p][co] * A[r_i][vh] * A[r_j][vw], axis=[r_i, r_j]
         ),
         name="inverse",
     )
