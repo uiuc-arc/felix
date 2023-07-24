@@ -12,7 +12,7 @@ __all__ = ["ansor_tune_full", "make_ansor_tuner"]
 
 def ansor_tune_full(
     tasks,
-    cost_model_path: str,
+    cost_model_path: Optional[str],
     json_log: Optional[utils.PathLike],
     n_total_measure: int,
     pop_size: int = 2048,

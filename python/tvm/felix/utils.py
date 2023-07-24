@@ -161,7 +161,10 @@ def load_and_register_ansor_tasks(task_pkl: PathLike, override_hw: bool) -> List
         )
         if override_hw:
             task = ansor.SearchTask(
-                workload_key=task.workload_key, target=TARGET, hardware_params=HW_PARAMS
+                workload_key=task.workload_key,
+                target=TARGET,
+                hardware_params=HW_PARAMS,
+                desc=task.desc,
             )
             tasks[i] = task, weight
     return tasks
@@ -367,9 +370,12 @@ def _parse_tvm_func_name(name: str) -> Tuple[List[Tuple[str, int]], int]:
         "nn_contrib_conv2d_NCHWc": ("ConvNCHWc", 2),
         "nn_contrib_conv2d_winograd_without_weight_transform": ("ConvW", 2),
         "nn_conv2d": ("Conv", 2),
+        "nn_conv3d": ("Conv3D", 2),
+        "nn_conv2d_transpose": ("ConvTranspose", 2),
         "nn_dense": ("Dense", 2),
         "nn_batch_matmul": ("BatchMatmul", 2),
         "nn_adaptive_avg_pool2d": ("AdaAvgPool", 1),
+        "nn_adaptive_avg_pool3d": ("AdaAvgPool3D", 1),
         "nn_avg_pool2d": ("AvgPool", 1),
         "nn_max_pool2d": ("MaxPool", 1),
         "fixed_point": ("Int", 1),
@@ -383,6 +389,8 @@ def _parse_tvm_func_name(name: str) -> Tuple[List[Tuple[str, int]], int]:
         "clip": ("Clip", 1),
         "nn_max": ("Max", 1),
         "nn_relu": ("ReLU", 1),
+        "nn_leaky_relu": ("LeakyReLU", 1),
+        "tanh": ("Tanh", 1),
         "sigmoid": ("Sigmoid", 1),
         "nn_softmax": ("Softmax", 1),
         "variance": ("Variance", 2),

@@ -1034,7 +1034,8 @@ void SplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
   writer->WriteString(record_prefix_str);
   writer->WriteArrayItem(stage_id);
   writer->WriteArrayItem(iter_id);
-  writer->WriteArrayItem(extent ? GetIntImm(extent.value()) : 0);
+  auto pint = extent.as<IntImmNode>();
+  writer->WriteArrayItem(pint ? pint->value : 0);
   std::vector<int> int_lengths;
   for (auto& length : lengths) {
     auto* node = length.as<IntImmNode>();

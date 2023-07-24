@@ -24,6 +24,9 @@ def get_network(name: str, batch_size: int):
     elif name == "dcgan":
         network, input_size = nn.dcgan()
         inputs = torch.randn(batch_size, *input_size)
+    elif name == "vit":
+        network, input_size = nn.vit()
+        inputs = torch.randn(batch_size, *input_size)
     else:
         raise ValueError(f"Invalid network: {name}")
     return network, inputs
@@ -35,8 +38,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-n", "--network", required=True, type=str)
     parser.add_argument("-b", "--batch-size", required=True, type=int)
-    parser.add_argument("--iters", required=True, type=int)
-    parser.add_argument("--per-layer", action="store_true")
+    parser.add_argument("--iters-per-layer", type=int, default=1024)
     return parser.parse_args()
 
 
@@ -55,13 +57,8 @@ def main():
         model, inputs = get_network(args.network, args.batch_size)
         tasks = felix.utils.extract_ansor_tasks(model, inputs, save_to=tasks_pkl)
         del model
-    if args.per_layer:
-        for idx in range(len(tasks)):
-            felix.ansor_tune_full(
-                tasks[idx : idx + 1], cost_model, work_dir / f"ansor_t{idx}.json", args.iters
-            )
-    else:
-        felix.ansor_tune_full(tasks, cost_model, work_dir / "ansor_configs.json", args.iters)
+    iters = args.iters_per_layer * len(tasks)
+    felix.ansor_tune_full(tasks, cost_model, work_dir / "ansor_configs.json", iters)
 
 
 if __name__ == "__main__":
