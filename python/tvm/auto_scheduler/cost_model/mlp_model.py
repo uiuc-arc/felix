@@ -19,6 +19,9 @@ __all__ = [
     "DatasetBuilder",
     "SegmentDataset",
     "BatchLoadingDataLoader",
+    "Performance",
+    "LatAndThruput",
+    "PerfScore",
 ]
 Num = Union[int, float]
 

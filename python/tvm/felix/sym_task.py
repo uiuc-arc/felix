@@ -1,22 +1,18 @@
 import logging
 import pickle as pkl
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
 import onnx
-import torch
-from torch import Tensor, nn
+from torch import nn
 from tqdm import tqdm
 from tvm import auto_scheduler as ansor
-from tvm.auto_scheduler.cost_model.mlp_model import LatAndThruput, Performance
-from tvm.auto_scheduler.measure_record import dump_record_to_string
+from tvm.auto_scheduler.loop_state import StateObject
 from tvm.auto_scheduler.workload_registry import register_workload_tensors
 
 from . import ffi, utils
-from .cost_model import MLPModelPLWrapper
-from .sketch import Sketch, SketchPerfFunc
+from .features import TorchFeatures
 from .sym_dag import RelayOpBuilder, SymbolicDAG
 from .utils import HW_PARAMS, TARGET, AnsorTaskWeight, PathLike
 
@@ -29,8 +25,9 @@ __all__ = [
     "extract_tasks",
     "load_and_register_tasks",
     "extract_tenset_pickle_tasks",
-    "measure_configs_latency_",
 ]
+
+FEATURE_CACHE_PATH = Path(Path("~").expanduser(), ".tvm", "felix", "features")
 
 
 class TaskInstance(NamedTuple):
@@ -62,7 +59,7 @@ class SymTask:
     def get_flops(self, sizes):
         return int(ffi.subst_by_name(self.flops_expr, sizes))
 
-    def find_sketch(self, backbone: tuple) -> Optional[Sketch]:
+    def find_sketch(self, backbone: tuple) -> Optional["Sketch"]:
         sketches = self._backbone_to_sketch.get(backbone)
         if sketches is None:
             _logger.warning(f"Backbone {backbone} not found")
@@ -260,119 +257,50 @@ def extract_tenset_pickle_tasks(tenset_task_pkl: PathLike, felix_task_pkl: PathL
     return [(sym_task, instance) for sym_task, instances in to_save for instance in instances]
 
 
-@dataclass
-class ConfigInfo:
-    config: Dict[str, int]
-    sketch_f: SketchPerfFunc
-    pred_perf: Performance
-    measure_input: Optional[ansor.MeasureInput] = None
-    measure_result: Optional[ansor.MeasureResult] = None
+class Sketch:
+    def __init__(self, task, sym_state: StateObject):
+        self.parent_task: SymTask = task
+        self.state_repr = str(sym_state)
+        self.tr_steps = sym_state.transform_steps
+        self.code, self.context = ffi.generate_code_for_state(task.ansor_task, sym_state, True)
+        self.backbone = ffi.extract_backbone(self.tr_steps)
 
-    def get_measured_perf(self) -> Optional[LatAndThruput]:
-        import numpy as np
+        _logger.debug("Sketch transformation steps: %s", ffi.print_state_tr_steps(sym_state))
+        _logger.debug("Code: %s", self.code)
+        _logger.debug("With loop sizes:\n%s", self.context.to_varmap())
 
-        mres = self.measure_result
-        if mres is None or mres.error_no != 0:
-            return None
-        lat_sec = np.mean([float(x) for x in mres.costs])
-        return LatAndThruput.from_latency_s(self.sketch_f.get_flops(), lat_sec)
+    def state_hash(self) -> str:
+        import hashlib
 
-    def get_measure_input(self):
-        if self.measure_input is None:
-            self.measure_input = self.sketch_f.make_measure_inputs([self.config])[0]
-        return self.measure_input
+        md5 = hashlib.md5()
+        md5.update(self.state_repr.encode())
+        return md5.hexdigest()
 
-    def to_tvm_string(self):
-        mres = self.measure_result
-        if mres is None:
-            mres = ansor.MeasureResult([], 0, "", 0, 0)
-        return dump_record_to_string(self.get_measure_input(), mres)
+    def save_path(self) -> Path:
+        return FEATURE_CACHE_PATH / f"{self.state_hash()}.json"
 
-
-def measure_configs_latency_(configs: List[ConfigInfo]):
-    from tvm.auto_scheduler.measure import ProgramMeasurer
-
-    measurer = ProgramMeasurer(ansor.LocalBuilder(), utils.MEASURER, [], False)
-    results = ffi.measure_performance(measurer, [c.get_measure_input() for c in configs])
-    for c, result in zip(configs, results):
-        if result.error_no != 0:
-            _logger.warning(result.error_msg)
-        c.measure_result = result
-    return configs
-
-
-class TaskPerfFunc(nn.Module):
-    def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPModelPLWrapper) -> None:
-        super().__init__()
-        self.sym_task = task
-        self.sizes = sizes
-        self.ansor_task, _ = task.make_concrete_task(sizes)
-        sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
-        self._sketches = nn.ModuleList(sketches)
-        self.perf_model = perf_model
-        self.flops = task.get_flops(sizes)
-
-    @property
-    def sketches(self):
-        return cast(List[SketchPerfFunc], list(self._sketches))
-
-    def forward(self, configs: List[Tensor]):
-        if len(configs) != len(self._sketches):
-            raise ValueError(
-                f"Number of configs {len(configs)} does not match number of sketches "
-                f"{len(self._sketches)} for task {self.task}"
-            )
-        perfs, constraints = utils.transpose2(
-            [sketch.forward(config) for sketch, config in zip(self.sketches, configs)]
-        )
-        # perfs: [n_sketches] x [n_configs]
-        # constraints: [n_sketches] x [n_configs, n_constraints]
-        return torch.stack(perfs, dim=0), constraints
-
-    def rand_configs(self, n: int) -> List[Tensor]:
-        return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
-
-    def get_best_configs(
-        self, configs: List[Tensor], remove_invalid: bool = True, dedup_set: Optional[set] = None
+    def fetch_features(
+        self,
+        sizes: Dict[str, int],
+        prime_factorize: bool = True,
+        max_n_buf: int = 5,
+        cache_line_size: int = 64,
     ):
-        """For each config, get its best version across all sketches.
-
-        `configs` is a list of configs and should have the same length as
-        what `rand_configs` returns (i.e., one Tensor per sketch).
-        """
-
-        # [n_sketches, n_configs]; [n_sketches] x [n_configs, n_constraints]
-        n_invalid, n_dup = 0, 0
-        perfs, constraints = self.forward(configs)
-        max_perfs, best_sketch_ids = perfs.max(dim=0)
-        ret: List[ConfigInfo] = []
-        dedup_set = dedup_set or set()
-        for idx, sketch in enumerate(self.sketches):
-            configs_ = configs[idx]
-            nan_or_inf = torch.any(torch.isnan(configs_) | torch.isinf(configs_), dim=1)
-            violates_cons = torch.sum(torch.relu(constraints[idx]) ** 2, dim=1) > 0
-            invalid = nan_or_inf | violates_cons
-            sketch_mask = best_sketch_ids == idx
-            if remove_invalid:
-                n_invalid += torch.sum(sketch_mask & invalid).item()
-                sketch_mask &= ~invalid
-            for conf_i in torch.nonzero(sketch_mask).squeeze(1):
-                config_dict = sketch.features.inv_transform_config(configs_[conf_i])
-                config_kvs = tuple(sorted(config_dict.items(), key=lambda x: x[0]))
-                if config_kvs in dedup_set:
-                    n_dup += 1
-                    continue
-                dedup_set.add(config_kvs)
-                perf = self.perf_model.output_to_performance(self.flops, max_perfs[conf_i].item())
-                ret.append(ConfigInfo(config_dict, sketch, perf))
-        _logger.info(
-            f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
+        path = self.save_path()
+        path.parent.mkdir(exist_ok=True, parents=True)
+        features = ffi.get_feature_pack(
+            self.code,
+            self.context,
+            HW_PARAMS,
+            sizes,
+            cache_line_size,
+            max_n_buf,
+            prime_factorize,
+            path.with_suffix("").as_posix(),
         )
-        return sorted(ret, key=lambda x: x.pred_perf, reverse=True)
+        return TorchFeatures.from_feat_pack(features)
 
-    def __repr__(self) -> str:
-        return (
-            f"TaskLatFunc({self.sym_task}, sizes={self.sizes}," f"sketches={len(self._sketches)})"
-        )
+    def __str__(self) -> str:
+        return f"Sketch({self.backbone} from {self.parent_task})"
 
-    __str__ = __repr__
+    __repr__ = __str__

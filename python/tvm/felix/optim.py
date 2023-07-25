@@ -1,24 +1,22 @@
 import logging
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, cast
 
 import torch
-from torch import Tensor, optim
+from torch import Tensor, nn, optim
 from torch.optim import lr_scheduler as lrs
 from tqdm import tqdm, trange
-from tvm.auto_scheduler.cost_model import DatasetBuilder
-from tvm.felix.sym_task import TaskPerfFunc
+from tvm import auto_scheduler as ansor
+from tvm.auto_scheduler.cost_model import DatasetBuilder, LatAndThruput, Performance
+from tvm.auto_scheduler.measure_record import dump_record_to_string
 
+from . import ffi
 from .cost_model import MLPModelPLWrapper
-from .sym_task import (
-    ConfigInfo,
-    SymTask,
-    TaskInstance,
-    TaskPerfFunc,
-    measure_configs_latency_,
-)
+from .sym_task import Sketch, SymTask, TaskInstance
+from .utils import MEASURER, transpose2
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Optimizer"]
@@ -141,19 +139,12 @@ class Optimizer:
         return measured_top
 
 
-def get_best_configs(configs: List[ConfigInfo]):
-    m_perf = [perf for c in configs if (perf := c.get_measured_perf()) is not None]
-    best_m_perf = max(m_perf, default=None)
-    best_p_perf = max([c.pred_perf for c in configs], default=None)
-    return best_m_perf, best_p_perf
-
-
 class TaskOptimizer:
     CK = 1
 
     def __init__(
         self,
-        task_f: TaskPerfFunc,
+        task_f: "TaskPerfFunc",
         configs: List[Tensor],
         optim: optim.Optimizer,
         lr_sched: Optional[lrs._LRScheduler],
@@ -193,7 +184,7 @@ class TaskOptimizer:
 
 
 class SingleRoundTaskOptimizer(TaskOptimizer):
-    def __init__(self, task_f: TaskPerfFunc, n_seeds: int, n_steps: int, lr: float) -> None:
+    def __init__(self, task_f: "TaskPerfFunc", n_seeds: int, n_steps: int, lr: float) -> None:
         configs = task_f.rand_configs(n_seeds)
         optimizer = optim.Adam(configs, lr)
         lr_sched = lrs.MultiStepLR(optimizer, milestones=[int(n_steps * 0.6)], gamma=0.2)
@@ -208,7 +199,7 @@ class SingleRoundTaskOptimizer(TaskOptimizer):
 class MultiRoundTaskOptimizer(TaskOptimizer):
     def __init__(
         self,
-        task_f: TaskPerfFunc,
+        task_f: "TaskPerfFunc",
         n_seeds: int,
         n_first_round_steps: int,
         n_latter_round_steps: int,
@@ -244,6 +235,155 @@ class MultiRoundTaskOptimizer(TaskOptimizer):
             features, _ = sketch_f.features.run_on_initial_configs(configs)
             builder.add_configs_(features, self.task_f.flops, lat_secs, {})
         return cis[:n_top]  # Only return the top configs.
+
+
+class SketchPerfFunc(nn.Module):
+    def __init__(self, task_perf_f, sketch: Sketch, cost_f: MLPModelPLWrapper) -> None:
+        super().__init__()
+        self.sketch = sketch
+        self.task_perf_f = task_perf_f
+        self.features = sketch.fetch_features(task_perf_f.sizes)
+        self.cost_f = cost_f
+
+    def get_flops(self):
+        return self.sketch.parent_task.get_flops(self.task_perf_f.sizes)
+
+    def forward(self, configs: Tensor) -> Tuple[Tensor, Tensor]:
+        feats, constraints = self.features(configs)
+        perf = self.cost_f.forward(feats)
+        return perf, constraints
+
+    def make_measure_inputs(self, configs: List[Dict[str, int]]):
+        task = self.task_perf_f.ansor_task
+        return [
+            ansor.MeasureInput(task, ffi.state_from_config(task, self.sketch.tr_steps, c))
+            for c in configs
+        ]
+
+
+@dataclass
+class ConfigInfo:
+    config: Dict[str, int]
+    sketch_f: SketchPerfFunc
+    pred_perf: Performance
+    measure_input: Optional[ansor.MeasureInput] = None
+    measure_result: Optional[ansor.MeasureResult] = None
+
+    def get_measured_perf(self) -> Optional[LatAndThruput]:
+        import numpy as np
+
+        mres = self.measure_result
+        if mres is None or mres.error_no != 0:
+            return None
+        lat_sec = np.mean([float(x) for x in mres.costs])
+        return LatAndThruput.from_latency_s(self.sketch_f.get_flops(), lat_sec)
+
+    def get_measure_input(self):
+        if self.measure_input is None:
+            self.measure_input = self.sketch_f.make_measure_inputs([self.config])[0]
+        return self.measure_input
+
+    def to_tvm_string(self):
+        mres = self.measure_result
+        if mres is None:
+            mres = ansor.MeasureResult([], 0, "", 0, 0)
+        return dump_record_to_string(self.get_measure_input(), mres)
+
+
+def get_best_configs(configs: List[ConfigInfo]):
+    m_perf = [perf for c in configs if (perf := c.get_measured_perf()) is not None]
+    best_m_perf = max(m_perf, default=None)
+    best_p_perf = max([c.pred_perf for c in configs], default=None)
+    return best_m_perf, best_p_perf
+
+
+def measure_configs_latency_(configs: List[ConfigInfo]):
+    from tvm.auto_scheduler.measure import ProgramMeasurer
+
+    measurer = ProgramMeasurer(ansor.LocalBuilder(), MEASURER, [], False)
+    results = ffi.measure_performance(measurer, [c.get_measure_input() for c in configs])
+    for c, result in zip(configs, results):
+        if result.error_no != 0:
+            _logger.warning(result.error_msg)
+        c.measure_result = result
+    return configs
+
+
+class TaskPerfFunc(nn.Module):
+    def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPModelPLWrapper) -> None:
+        super().__init__()
+        self.sym_task = task
+        self.sizes = sizes
+        self.ansor_task, _ = task.make_concrete_task(sizes)
+        sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
+        self._sketches = nn.ModuleList(sketches)
+        self.perf_model = perf_model
+        self.flops = task.get_flops(sizes)
+
+    @property
+    def sketches(self):
+        return cast(List[SketchPerfFunc], list(self._sketches))
+
+    def forward(self, configs: List[Tensor]):
+        if len(configs) != len(self._sketches):
+            raise ValueError(
+                f"Number of configs {len(configs)} does not match number of sketches "
+                f"{len(self._sketches)} for task {self.task}"
+            )
+        perfs, constraints = transpose2(
+            [sketch.forward(config) for sketch, config in zip(self.sketches, configs)]
+        )
+        # perfs: [n_sketches] x [n_configs]
+        # constraints: [n_sketches] x [n_configs, n_constraints]
+        return torch.stack(perfs, dim=0), constraints
+
+    def rand_configs(self, n: int) -> List[Tensor]:
+        return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
+
+    def get_best_configs(
+        self, configs: List[Tensor], remove_invalid: bool = True, dedup_set: Optional[set] = None
+    ):
+        """For each config, get its best version across all sketches.
+
+        `configs` is a list of configs and should have the same length as
+        what `rand_configs` returns (i.e., one Tensor per sketch).
+        """
+
+        # [n_sketches, n_configs]; [n_sketches] x [n_configs, n_constraints]
+        n_invalid, n_dup = 0, 0
+        perfs, constraints = self.forward(configs)
+        max_perfs, best_sketch_ids = perfs.max(dim=0)
+        ret: List[ConfigInfo] = []
+        dedup_set = dedup_set or set()
+        for idx, sketch in enumerate(self.sketches):
+            configs_ = configs[idx]
+            nan_or_inf = torch.any(torch.isnan(configs_) | torch.isinf(configs_), dim=1)
+            violates_cons = torch.sum(torch.relu(constraints[idx]) ** 2, dim=1) > 0
+            invalid = nan_or_inf | violates_cons
+            sketch_mask = best_sketch_ids == idx
+            if remove_invalid:
+                n_invalid += torch.sum(sketch_mask & invalid).item()
+                sketch_mask &= ~invalid
+            for conf_i in torch.nonzero(sketch_mask).squeeze(1):
+                config_dict = sketch.features.inv_transform_config(configs_[conf_i])
+                config_kvs = tuple(sorted(config_dict.items(), key=lambda x: x[0]))
+                if config_kvs in dedup_set:
+                    n_dup += 1
+                    continue
+                dedup_set.add(config_kvs)
+                perf = self.perf_model.output_to_performance(self.flops, max_perfs[conf_i].item())
+                ret.append(ConfigInfo(config_dict, sketch, perf))
+        _logger.info(
+            f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
+        )
+        return sorted(ret, key=lambda x: x.pred_perf, reverse=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"TaskLatFunc({self.sym_task}, sizes={self.sizes}," f"sketches={len(self._sketches)})"
+        )
+
+    __str__ = __repr__
 
 
 class Timer:
