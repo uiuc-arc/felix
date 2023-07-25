@@ -54,8 +54,9 @@ def parse_args():
     tr_mlp = commands.add_parser("train_mlp")
     tr_mlp.add_argument("-d", "--dataset", required=True, type=Path)
     tr_mlp.add_argument("--train-ratio", type=float, default=0.9)
-    tr_mlp.add_argument("--min-tflops", type=float)
-    tr_mlp.add_argument("--max-tflops", type=float)
+    tr_mlp.add_argument("--min-lat", type=float)
+    tr_mlp.add_argument("--max-lat", type=float)
+    tr_mlp.add_argument("--use-latency", action="store_true")
     tr_mlp.add_argument("--loss-f", type=str, choices=["mse", "log_mse", "rank"], default="mse")
     tr_mlp.set_defaults(func=lambda args: train_mlp(**varargs(args)))
 
@@ -291,57 +292,34 @@ def plot_xgb_perf(data_points: list, out_file: Path):
     plt.close(fig)
 
 
-def run_mlp_and_plot(pred_model: felix.MLPModelPLWrapper, save_dir: Path):
-    data_points = []
-    val_loader = pred_model.val_dataloader()
-    for seg_sizes, features, labels, _ in val_loader:
-        pred_vals = pred_model.forward_in_segments(seg_sizes, features, True)
-        pred_vals = pred_vals.detach().numpy()
-        for pred_val, groundtruth in zip(pred_vals, labels):
-            groundtruth = groundtruth.item()
-            data_points.append((pred_val, groundtruth))
-    x_log = pred_model.main_loss in ("mse", "log_mse")
-    fig, ax = plt.subplots(1, 1)
-    xs, ys = utils.transpose2(data_points)
-    ax.scatter(xs, ys, s=1)
-    if x_log:
-        ax.set_xlabel("Predicted throughput (TFLOPs/sec)")
-        ax.set_xscale("log")
-    else:
-        ax.set_xlabel("Predicted throughput score")
-    ax.set_ylabel("Measured throughput (TFLOPs/sec)")
-    ax.set_yscale("log")
-    fig.savefig(save_dir.as_posix(), dpi=300)
-    return data_points
-
-
-def plot_configs_perf_dist(dataset, save_to: Path):
+def plot_configs_perf_dist(dataset: SegmentDataset, save_to: Path):
     fig, ax = plt.subplots(dpi=300)
     xs = torch.arange(len(dataset))
-    ax.scatter(xs.numpy(), dataset.labels.numpy(), s=1)
-    ax.set_ylabel("Measured throughput (TFLOPs/sec)")
+    ax.scatter(xs.numpy(), dataset.flops_lats[:, 1].numpy(), s=1)
+    ax.set_ylabel("Measured latency (sec)")
     ax.set_yscale("log")
     fig.savefig(save_to.as_posix())
 
 
-def select_dataset_by_perf(
+def select_dataset_by_lat(
     dataset: SegmentDataset, min_: Optional[float] = None, max_: Optional[float] = None
 ):
-    all_true = torch.ones_like(dataset.labels, dtype=torch.bool)
-    lb_mask = all_true if min_ is None else dataset.labels >= min_
-    ub_mask = all_true if max_ is None else dataset.labels <= max_
+    latencies = dataset.flops_lats[:, 1]
+    all_true = torch.ones_like(latencies, dtype=torch.bool)
+    lb_mask = all_true if min_ is None else latencies >= min_
+    ub_mask = all_true if max_ is None else latencies <= max_
     taken_indices = torch.nonzero(lb_mask & ub_mask)[:, 0]
     logger.info(f"Selected {len(taken_indices)} configs out of {len(dataset)}")
-    seg_size, features, labels, conf = dataset[taken_indices]
-    return SegmentDataset(seg_size, features, labels, conf)  # type: ignore
+    return dataset.slice(taken_indices)
 
 
 def train_mlp(
     dataset: Path,
     loss_f: str,
     train_ratio: float,
-    min_tflops: Optional[float],
-    max_tflops: Optional[float],
+    min_lat: Optional[float],
+    max_lat: Optional[float],
+    use_latency: bool,
     tasks,
 ):
     import pytorch_lightning as pl
@@ -349,10 +327,10 @@ def train_mlp(
 
     dataset_ = torch.load(dataset)
     assert isinstance(dataset_, SegmentDataset)
-    n_features = dataset_.features.shape[1]
-    pred_model = felix.MLPModelPLWrapper(n_features, loss_func=loss_f)
-    dataset_ = select_dataset_by_perf(dataset_, min_tflops, max_tflops)
-    pred_model.set_dataset_(dataset_, train_ratio)
+    # We don't need this and manipulating it is slow; setting it to None will speed up the training.
+    dataset_.conf_meta = None
+    pred_model = felix.MLPModelPLWrapper(dataset_.features.shape[1], loss_f, use_latency)
+    pred_model.set_dataset_(select_dataset_by_lat(dataset_, min_lat, max_lat), train_ratio)
     val_loss = pred_model.val_loss_name
     filename = "epoch={epoch:02d}-loss={%s:.4f}" % val_loss
     ckpt = ModelCheckpoint(
@@ -371,7 +349,7 @@ def train_mlp(
     assert log_dir is not None
     plot_configs_perf_dist(dataset_, Path(log_dir) / "configs_perf_dist.png")
     pred_model.load_from_checkpoint(ckpt.best_model_path)
-    run_mlp_and_plot(pred_model, Path(log_dir) / "val_set_pred.png")
+    pred_model.run_and_plot_validation(Path(log_dir) / "val_set_pred.png")
 
 
 if __name__ == "__main__":

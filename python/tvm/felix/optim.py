@@ -18,7 +18,6 @@ from .sym_task import (
     TaskInstance,
     TaskPerfFunc,
     measure_configs_latency_,
-    print_perf,
 )
 
 _logger = logging.getLogger(__name__)
@@ -28,15 +27,15 @@ PathLike = Union[Path, str]
 
 class Optimizer:
     def __init__(
-        self, tasks: List[Tuple[SymTask, TaskInstance]], cost_model: MLPModelPLWrapper
+        self, tasks: List[Tuple[SymTask, TaskInstance]], perf_model: MLPModelPLWrapper
     ) -> None:
         self.timer = Timer()
         self.tasks: Dict[int, Tuple[TaskPerfFunc, int]] = {}
         for sym_task, inst in tqdm(tasks):
             with self.timer.time(f"create[{inst.idx}]"):
-                task_f = TaskPerfFunc(sym_task, inst.sizes, cost_model)
+                task_f = TaskPerfFunc(sym_task, inst.sizes, perf_model)
             self.tasks[inst.idx] = task_f, inst.weight
-        self.cost_model = cost_model
+        self.perf_model = perf_model
 
     def tune_one_round(
         self,
@@ -58,7 +57,7 @@ class Optimizer:
             assert idx not in results
             results[idx] = configs
             best_pred_perf = max([c.pred_perf for c in configs], default=None)
-            _logger.info(f"Task {idx}: best predicted {print_perf(best_pred_perf, weight)}")
+            _logger.info(f"Task {idx}: best predicted {best_pred_perf} (weight = {weight})")
         to_measure = [c for task_idx in self.tasks for c in results[task_idx][:n_measurements]]
         with self.timer.time(f"measure"):
             measure_configs_latency_(to_measure)
@@ -91,8 +90,7 @@ class Optimizer:
                 results_.extend(mtop)
                 best_actual, best_pred = get_best_configs(results_)
                 _logger.info(
-                    f"Overall: best measured {print_perf(best_actual, weight)}, "
-                    f"best predicted {print_perf(best_pred, weight)}"
+                    f"Overall: best measured {best_actual}, best predicted {best_pred} (weight = {weight})"
                 )
         self._summarize(results, log_file)
 
@@ -102,8 +100,10 @@ class Optimizer:
         for idx in self.tasks:
             configs_ = results[idx]
             weight = self.tasks[idx][1]
-            best_actual, _ = get_best_configs(configs_)
-            _logger.info(f"Task {idx}: best measured {print_perf(best_actual, self.tasks[idx][1])}")
+            best_actual, best_predicted = get_best_configs(configs_)
+            _logger.info(
+                f"Task {idx}: best measured {best_actual}, best predicted {best_predicted} (weight = {self.tasks[idx][1]})"
+            )
             if best_actual is not None:
                 total_lat += best_actual.latency_us * weight
             configs += configs_
@@ -125,9 +125,9 @@ class Optimizer:
         for _ in trange(n_steps):
             optimizer.optimize_step()
         measured_top = optimizer.measure_for_dataset(measure_top, measure_rand, builder)
-        self.cost_model.train_self(
+        self.perf_model.train_self(
             builder.to_dataset(),
-            self.cost_model.main_loss,
+            self.perf_model.main_loss,
             lr=1e-4,
             weight_decay=1e-6,
             batch_size=32,
@@ -136,8 +136,7 @@ class Optimizer:
         )
         best_actual, best_pred = get_best_configs(measured_top)
         _logger.info(
-            f"This round: best measured {print_perf(best_actual, weight)}, "
-            f"best predicted {print_perf(best_pred, weight)}"
+            f"This round: best measured {best_actual}, best predicted {best_pred} (weight = {weight})"
         )
         return measured_top
 
@@ -149,18 +148,8 @@ def get_best_configs(configs: List[ConfigInfo]):
     return best_m_perf, best_p_perf
 
 
-def print_each_config(weight: int, configs: List[ConfigInfo]):
-    printed_configs = ["Top configs:"] + [
-        f"  pred perf={print_perf(config.pred_perf, weight)}, "
-        f"measured={print_perf(config.get_measured_perf(), weight)}, \n"
-        f"  config: {config.config} (from {config.sketch_f.sketch.backbone})"
-        for config in configs
-    ]
-    _logger.info("\n".join(printed_configs))
-
-
 class TaskOptimizer:
-    CK = 5
+    CK = 1
 
     def __init__(
         self,
@@ -179,23 +168,20 @@ class TaskOptimizer:
 
     def optimize_step(self):
         # 1. Compute loss.
-        # costs: [n_sketches, n_configs]
+        # perfs: [n_sketches, n_configs]
         # constraints: [n_sketches] x [n_configs, n_constraints]
         perfs, constraints = self.task_f.forward(self.configs)
         if self._step_idx % 10 == 0:
-            min_, max_ = (
-                perfs.min(dim=1).values.detach(),
-                perfs.max(dim=1).values.detach(),
-            )
-            _logger.info(f"min perf={min_}, max perf={max_}")
+            to_perf = lambda x: self.task_f.perf_model.output_to_performance(self.task_f.flops, x)
+            min_perfs = [to_perf(p) for p in perfs.min(dim=1).values.tolist()]
+            max_perfs = [to_perf(p) for p in perfs.max(dim=1).values.tolist()]
+            _logger.info(f"min perf={min_perfs}, max perf={max_perfs}")
         self._step_idx += 1
+        # Constraints are good when <= 0.
+        penalties = [(cs.relu() ** 2).sum() for cs in constraints]
         # Model predicts a performance score (higher is better)
         # Need to invert it into something lower-better.
-        costs = -perfs
-        lat_loss = torch.sum(costs)
-        # Constraints are good when <= 0.
-        penalties = sum([(cs.relu() ** 2).sum() for cs in constraints])
-        loss = lat_loss + self.CK * penalties
+        loss = torch.sum(-perfs) + self.CK * sum(penalties)
         # 2. Keep a history of these values.
         self._configs.append([c.clone().detach() for c in self.configs])
         # 3. Backprop and update.
@@ -256,7 +242,7 @@ class MultiRoundTaskOptimizer(TaskOptimizer):
             configs, lat_secs = zip(*conf_perfs)
             lat_secs = torch.tensor(list(lat_secs))
             features, _ = sketch_f.features.run_on_initial_configs(configs)
-            builder.add_configs_(features, self.task_f.flops, lat_secs)
+            builder.add_configs_(features, self.task_f.flops, lat_secs, {})
         return cis[:n_top]  # Only return the top configs.
 
 

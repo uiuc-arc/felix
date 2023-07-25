@@ -1,5 +1,7 @@
 import logging
-from typing import Dict, List, Union
+from dataclasses import dataclass
+from functools import total_ordering
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import Tensor, nn
@@ -32,9 +34,10 @@ class AnsorMLPModel(PythonBasedModel):
     def __init__(self, model_path: str) -> None:
         super().__init__()
         checkpoint = torch.load(model_path, map_location="cpu")
-        self.loss_func = lf = checkpoint["hyper_parameters"]["loss_func"]
+        self.loss_func = checkpoint["hyper_parameters"]["loss_func"]
+        self.use_latency = checkpoint["hyper_parameters"]["use_latency"]
         n_feats = checkpoint["hyper_parameters"]["n_features"]
-        self.model = MLPCostModel(n_feats, 256, lf == "log_mse", lf != "rank")
+        self.model = MLPCostModel(n_feats, 256)
         self.model.load_state_dict(checkpoint["state_dict"])
         self.model = self.model.eval().cuda()
         self.data_builder = DatasetBuilder()
@@ -50,9 +53,9 @@ class AnsorMLPModel(PythonBasedModel):
         features = ft.get_per_store_features_from_states(states, task)
         features = [torch.from_numpy(st_feats.astype(float)).float() for st_feats in features]
         lats = torch.tensor([[float(x) for x in res.costs] for res in results]).mean(dim=1)
-        self.data_builder.add_configs_(features, flops, lats)
+        self.data_builder.add_configs_(features, flops, lats, {})
         self.model.train_self(
-            self.data_builder.to_dataset(),
+            self.data_builder.to_dataset(self.use_latency),
             self.loss_func,
             lr=7e-4,
             weight_decay=1e-6,
@@ -74,19 +77,59 @@ class AnsorMLPModel(PythonBasedModel):
         raise RuntimeError("MLPModel does not support predict_stages")
 
 
+@dataclass
+@total_ordering
+class LatAndThruput:
+    latency_us: float
+    thruput_tflops: float
+
+    @classmethod
+    def from_thruput(cls, flops: float, thruput_tflops: float):
+        thruput_flops = thruput_tflops * 1e12
+        latency_us = flops / thruput_flops * 1e6
+        return cls(latency_us, thruput_tflops)
+
+    @classmethod
+    def from_latency_s(cls, flops: float, latency_s: float):
+        latency_us = latency_s * 1e6
+        thruput_tflops = flops / latency_s / 1e12
+        return cls(latency_us, thruput_tflops)
+
+    def __lt__(self, other) -> bool:
+        if not isinstance(other, LatAndThruput):
+            return NotImplemented
+        return self.thruput_tflops < other.thruput_tflops
+
+    def __repr__(self) -> str:
+        return f"({self.latency_us:.2f} us, {self.thruput_tflops:.4f} TFLOPs)"
+
+
+@dataclass
+@total_ordering
+class PerfScore:
+    score: float
+
+    def __lt__(self, other) -> bool:
+        if not isinstance(other, PerfScore):
+            return NotImplemented
+        return self.score < other.score
+
+    def __repr__(self) -> str:
+        return f"PerfScore({self.score:.3f})"
+
+
+Performance = Union[LatAndThruput, PerfScore]
+
+
 class MLPCostModel(nn.Module):
     def __init__(
         self,
         in_dim,
         hidden_dim,
-        output_log: bool,
-        is_throughput: bool,
         out_dim: int = 1,
         use_norm: bool = False,
     ):
         super().__init__()
-        self.output_log = output_log
-        self.is_throughput = is_throughput
         self.segment_encoder = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
@@ -112,15 +155,15 @@ class MLPCostModel(nn.Module):
         segment_sizes = torch.full(
             (features.shape[0],), features.shape[1], dtype=torch.long, device=self.device
         )
-        return self.forward_in_segments(segment_sizes, features.flatten(0, 1), True)
+        return self.forward_in_segments(segment_sizes, features.flatten(0, 1))
 
-    def forward_on_batch(self, features: List[Tensor], inference: bool = True):
+    def forward_on_batch(self, features: List[Tensor]):
         segment_sizes = [len(f) for f in features]
         segment_sizes = torch.tensor(segment_sizes, dtype=torch.long, device=self.device)
         features_ = torch.cat(features, dim=0)
-        return self.forward_in_segments(segment_sizes, features_, inference)
+        return self.forward_in_segments(segment_sizes, features_)
 
-    def forward_in_segments(self, segment_sizes, features, inference: bool):
+    def forward_in_segments(self, segment_sizes, features):
         n_seg = segment_sizes.shape[0]
         device = self.device
         segment_sizes = segment_sizes.long()
@@ -136,10 +179,19 @@ class MLPCostModel(nn.Module):
         output = self.norm(segment_sum)
         output = self.l0(output) + output
         output = self.l1(output) + output
-        output = self.decoder(output).squeeze(-1)
-        if self.output_log and inference:
-            output = torch.exp(output)
-        return output
+        return self.decoder(output).squeeze(-1)
+
+    def output_to_performance(self, loss_func: str, use_latency: bool, flops: float, output: float):
+        import numpy as np
+
+        if loss_func == "rank":
+            return PerfScore(output)
+        elif loss_func == "log_mse":
+            output = np.exp(output)
+        if use_latency:
+            return LatAndThruput.from_latency_s(flops, 1 / output)
+        else:
+            return LatAndThruput.from_thruput(flops, output)
 
     def train_self(
         self,
@@ -158,8 +210,8 @@ class MLPCostModel(nn.Module):
         self.train().cuda()
         optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
         dataloader = BatchLoadingDataLoader(dataset, batch_size, shuffle=True)
-        loss_f = MLPLossFunc(loss_func)
         logger.info("Dataset size: %d (%d batches)", len(dataset), len(dataloader))
+        loss_f = MLPLossFunc(loss_func)
         for epoch in range(n_epoch):
             epoch_loss = 0.0
             for segment_sizes, features, labels, _ in dataloader:
@@ -167,7 +219,7 @@ class MLPCostModel(nn.Module):
                 features = features.cuda()
                 labels = labels.cuda()
                 optimizer.zero_grad()
-                loss = loss_f(self.forward_in_segments(segment_sizes, features, False), labels)
+                loss = loss_f(self.forward_in_segments(segment_sizes, features), labels)
                 loss.backward()
                 optimizer.step()
                 epoch_loss = moving_average(epoch_loss, loss.item())
@@ -187,34 +239,27 @@ class MLPCostModel(nn.Module):
 class DatasetBuilder:
     def __init__(self) -> None:
         self.features: List[Tensor] = []
-        self.labels: List[float] = []
+        self.labels: List[Tuple[float, float]] = []
         self.conf_meta: List[dict] = []
 
     def add_config_(self, feature: Tensor, flops: Num, latency: Num, conf_meta: dict):
-        if (label := self.make_label(flops, latency)) <= 0:
-            return
         self.features.append(feature)
-        self.labels.append(label)
+        self.labels.append((flops, latency))
         self.conf_meta.append(conf_meta)
 
-    def add_configs_(self, features: list, flops: float, latencies: Tensor, conf_meta: dict):
-        labels = self.make_label(flops, latencies)
-        for feat_, label_ in zip(features, labels):
-            if label_ > 0:
-                self.features.append(feat_)
-                self.labels.append(label_.item())
-                self.conf_meta.append(conf_meta)
+    def add_configs_(self, features: list, flops: Num, latencies: Tensor, conf_meta: dict):
+        for feats, latency in zip(features, latencies):
+            if not latency > 0:
+                continue
+            self.features.append(feats)
+            self.labels.append((flops, latency.item()))
+            self.conf_meta.append(conf_meta)
 
-    def to_dataset(self):
+    def to_dataset(self, use_latency: bool = True):
         seg_size = torch.tensor([f.shape[0] for f in self.features])
         conf_meta = self.conf_meta if self.conf_meta else [{} for _ in self.features]
-        return SegmentDataset(
-            seg_size, torch.cat(self.features, dim=0), torch.tensor(self.labels), conf_meta
-        )
-
-    def make_label(self, flops, lat_sec):
-        # output from model is trained to be throughput (TFlops/s)
-        return flops / lat_sec / 1e12
+        features = torch.cat(self.features, dim=0)
+        return SegmentDataset(seg_size, features, torch.tensor(self.labels), conf_meta, use_latency)
 
 
 class SegmentDataset(data.Dataset):
@@ -222,38 +267,46 @@ class SegmentDataset(data.Dataset):
         self,
         segment_sizes: Tensor,
         features: Tensor,
-        labels: Tensor,
-        conf_meta: List[Dict],
+        flops_lats: Tensor,
+        conf_meta: Optional[List[Dict]],
+        use_latency: bool = True,
     ):
+        super().__init__()
         self.features = features
         seg_sum = torch.cumsum(segment_sizes, 0, dtype=torch.int32)
         begins, ends = seg_sum - segment_sizes, seg_sum
         self.segment_ranges = torch.stack([begins, ends], dim=1)
-        self.labels = labels
+        self.flops_lats = flops_lats
         self.conf_meta = conf_meta
+        self.use_latency = use_latency
 
-    def __getitem__(self, index_: Union[int, List[int]]):
-        if isinstance(index_, Tensor):
-            index = index_
+    def _slice(self, indices: Tensor):
+        ranges = self.segment_ranges[indices]
+        begin, end = ranges.T
+        segment_sizes = end - begin
+        features = torch.cat([self.features[b:e] for b, e in ranges], dim=0)
+        flops_lats = self.flops_lats[indices]
+        conf_meta = [self.conf_meta[n] for n in indices.tolist()] if self.conf_meta else None
+        return segment_sizes, features, flops_lats, conf_meta
+
+    def slice(self, indices: Tensor):
+        return SegmentDataset(*self._slice(indices))
+
+    def __getitem__(self, index_: Union[int, Tensor]):
+        squeeze = isinstance(index_, int)
+        indices = torch.tensor([index_]) if squeeze else index_
+        seg_size, features, fls, conf_meta = self._slice(indices)
+        if self.use_latency:
+            labels = 1 / fls[:, 1]  # Inverse of latency (sec) to maintain higher-better
         else:
-            index = torch.tensor(index_)
-        ranges = self.segment_ranges[index]  # 0d or 1d tensor
-        labels = self.labels[index]
-        conf: Union[Dict, List[Dict]]
-        if index.ndim == 0:
-            begin, end = ranges
-            seg_size = end - begin
-            features = self.features[begin:end]
-            conf = self.conf_meta[int(index.item())]
-        else:
-            begin, end = ranges.T
-            seg_size = end - begin
-            features = torch.cat([self.features[b:e] for b, e in ranges], dim=0)
-            conf = [self.conf_meta[n] for n in index.tolist()]
-        return seg_size, features, labels, conf
+            labels = fls[:, 0] / fls[:, 1] / 1e12  # In TFLOPs/sec
+        if squeeze:
+            seg_size, fls, features = seg_size.item(), fls.squeeze(0), features.squeeze(0)
+            conf_meta = conf_meta[0] if conf_meta else None
+        return seg_size, features, labels, conf_meta
 
     def __len__(self):
-        return len(self.labels)
+        return len(self.flops_lats)
 
 
 class BatchLoadingDataLoader:
@@ -268,7 +321,7 @@ class BatchLoadingDataLoader:
 
     def __iter__(self):
         for batch_indices in iter(self.batch_sampler):
-            yield self.dataset[batch_indices]
+            yield self.dataset[torch.tensor(batch_indices)]
 
     def sample_batch(self, batch_size):
         raise NotImplementedError()

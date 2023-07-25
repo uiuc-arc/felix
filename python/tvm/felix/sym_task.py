@@ -2,7 +2,6 @@ import logging
 import pickle as pkl
 from collections import defaultdict
 from dataclasses import dataclass
-from functools import total_ordering
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
@@ -11,11 +10,12 @@ import torch
 from torch import Tensor, nn
 from tqdm import tqdm
 from tvm import auto_scheduler as ansor
-from tvm.auto_scheduler.cost_model import MLPCostModel
+from tvm.auto_scheduler.cost_model.mlp_model import LatAndThruput, Performance
 from tvm.auto_scheduler.measure_record import dump_record_to_string
 from tvm.auto_scheduler.workload_registry import register_workload_tensors
 
 from . import ffi, utils
+from .cost_model import MLPModelPLWrapper
 from .sketch import Sketch, SketchPerfFunc
 from .sym_dag import RelayOpBuilder, SymbolicDAG
 from .utils import HW_PARAMS, TARGET, AnsorTaskWeight, PathLike
@@ -261,54 +261,6 @@ def extract_tenset_pickle_tasks(tenset_task_pkl: PathLike, felix_task_pkl: PathL
 
 
 @dataclass
-@total_ordering
-class LatAndThruput:
-    latency_us: float
-    thruput_tflops: float
-
-    @classmethod
-    def from_thruput(cls, flops: float, thruput_tflops: float):
-        thruput_flops = thruput_tflops * 1e12
-        latency_us = flops / thruput_flops * 1e6
-        return cls(latency_us, thruput_tflops)
-
-    @classmethod
-    def from_latency_s(cls, flops: float, latency_sec: float):
-        latency_us = latency_sec * 1e6
-        thruput_tflops = flops / latency_sec / 1e12
-        return cls(latency_us, thruput_tflops)
-
-    def __lt__(self, other) -> bool:
-        if not isinstance(other, LatAndThruput):
-            return NotImplemented
-        return self.thruput_tflops < other.thruput_tflops
-
-
-@dataclass
-@total_ordering
-class PerfScore:
-    score: float
-
-    def __lt__(self, other) -> bool:
-        if not isinstance(other, PerfScore):
-            return NotImplemented
-        return self.score < other.score
-
-
-Performance = Union[LatAndThruput, PerfScore]
-
-
-def print_perf(shape: Optional[Performance], weight: int):
-    if isinstance(shape, LatAndThruput):
-        return f"{shape.latency_us:.2f} us (*{weight}), {shape.thruput_tflops:.4f} TFLOPs"
-    if isinstance(shape, PerfScore):
-        return f"score {shape.score:.3f} (weight={weight})"
-    if shape is None:
-        return "N/A"
-    assert False
-
-
-@dataclass
 class ConfigInfo:
     config: Dict[str, int]
     sketch_f: SketchPerfFunc
@@ -350,14 +302,14 @@ def measure_configs_latency_(configs: List[ConfigInfo]):
 
 
 class TaskPerfFunc(nn.Module):
-    def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPCostModel) -> None:
+    def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPModelPLWrapper) -> None:
         super().__init__()
         self.sym_task = task
         self.sizes = sizes
         self.ansor_task, _ = task.make_concrete_task(sizes)
         sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
         self._sketches = nn.ModuleList(sketches)
-        self.is_throughput = perf_model.is_throughput
+        self.perf_model = perf_model
         self.flops = task.get_flops(sizes)
 
     @property
@@ -411,11 +363,7 @@ class TaskPerfFunc(nn.Module):
                     n_dup += 1
                     continue
                 dedup_set.add(config_kvs)
-                perf = max_perfs[conf_i].item()
-                if self.is_throughput:
-                    perf = LatAndThruput.from_thruput(self.flops, perf)
-                else:
-                    perf = PerfScore(perf)
+                perf = self.perf_model.output_to_performance(self.flops, max_perfs[conf_i].item())
                 ret.append(ConfigInfo(config_dict, sketch, perf))
         _logger.info(
             f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
