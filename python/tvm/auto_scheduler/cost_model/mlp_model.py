@@ -262,7 +262,8 @@ class DatasetBuilder:
         seg_size = torch.tensor([f.shape[0] for f in self.features])
         conf_meta = self.conf_meta if self.conf_meta else [{} for _ in self.features]
         features = torch.cat(self.features, dim=0)
-        return SegmentDataset(seg_size, features, torch.tensor(self.labels), conf_meta, use_latency)
+        labels = torch.tensor(self.labels).float()
+        return SegmentDataset(seg_size, features, labels, conf_meta, use_latency)
 
 
 class SegmentDataset(data.Dataset):

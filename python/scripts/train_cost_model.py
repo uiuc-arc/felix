@@ -6,7 +6,6 @@ from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
-import tvm
 from matplotlib import pyplot as plt
 from tvm import felix
 from tvm.auto_scheduler.cost_model import (
@@ -18,7 +17,7 @@ from tvm.auto_scheduler.cost_model import (
 from tvm.auto_scheduler.feature import (
     get_per_store_features_from_measure_pairs as get_ansor_features,
 )
-from tvm.felix import utils
+from tvm.felix import ffi, utils
 
 WORK_DIR = Path(f"lightning_logs/{utils.TARGET.model}")
 MRECORDS = WORK_DIR / "measure_records"
@@ -48,7 +47,7 @@ def parse_args():
     fdataset.add_argument("-l", "--logs", required=True, nargs="+", type=str)
     fdataset.add_argument("-o", "--output", type=Path, default=FELIX_DATASET_OUT)
     fdataset.add_argument("--tasks-out", type=Path, default=FELIX_TASKS_PKL_OUT)
-    fdataset.add_argument("--felix-features", action="store_true")
+    fdataset.add_argument("--ansor-features", action="store_true")
     fdataset.set_defaults(func=lambda args: felix_dataset(**varargs(args)))
 
     tr_mlp = commands.add_parser("train_mlp")
@@ -57,7 +56,7 @@ def parse_args():
     tr_mlp.add_argument("--min-lat", type=float)
     tr_mlp.add_argument("--max-lat", type=float)
     tr_mlp.add_argument("--use-latency", action="store_true")
-    tr_mlp.add_argument("--loss-f", type=str, choices=["mse", "log_mse", "rank"], default="mse")
+    tr_mlp.add_argument("--loss-f", type=str, choices=["mse", "log_mse", "rank"], default="log_mse")
     tr_mlp.set_defaults(func=lambda args: train_mlp(**varargs(args)))
 
     tr_xgb = commands.add_parser("train_xgb")
@@ -109,43 +108,37 @@ def load_ansor_configs_stream(tasks: FelixTasks, config_files: List[Path]):
 
 
 def _add_felix_configs(
-    builder, filename, sym_task: felix.SymTask, inst: felix.TaskInstance, configs
+    builder, sym_task: felix.SymTask, inst: felix.TaskInstance, inp_res_pairs, filename
 ):
-    try:
-        # Only actually read in the configs now.
-        loaded_confs = utils.process_inp_res_pairs(configs, False)
-    except tvm.TVMError as e:
-        logger.warning(f"Failed to load configs for task; skipping. Error: {e}")
-        return
-    sizes = inst.sizes
-    flops = sym_task.get_flops(sizes)
     conf_counter = 0
-    for backbone, backbone_confs in utils.group_configs_by_backbone(loaded_confs).items():
+    flops = sym_task.get_flops(inst.sizes)
+    for backbone, configs_ in utils.group_configs_by_backbone(inp_res_pairs).items():
         sketch = sym_task.find_sketch(backbone)
         assert sketch is not None
-        var_values = [c["var_values"] | sizes for c in backbone_confs]
-        feature_f = sketch.fetch_features(sizes, prime_factorize=False)
+        feature_f = sketch.fetch_features(inst.sizes, prime_factorize=False)
         assert feature_f is not None
+        var_values = [dict(ffi.extract_config_dict(inp.state)) for inp, _ in configs_]
         our_feats, _ = feature_f.run_on_initial_configs(var_values)
-        for conf, feats in zip(backbone_confs, our_feats):
+        for (_, res), feats in zip(configs_, our_feats):
             nan_or_inf = torch.isnan(feats).any() or torch.isinf(feats).any()
             # Anything more than 100 (heuristically chosen) is probably a bug
             # because the features are already log-scaled.
             large_magnitude = torch.abs(feats).max() > 100
             if nan_or_inf or large_magnitude:
                 continue
+            cost = np.array([float(x) for x in res.costs]).mean()
             metadata = {
                 "task_idx": inst.idx,
                 "config_file": filename,
-                "n_steps": len(conf["backbone"]),
+                "n_steps": len(backbone),
             }
-            builder.add_config_(feats, flops, conf["time"], metadata)
+            builder.add_config_(feats, flops, cost, metadata)
             conf_counter += 1
     return conf_counter
 
 
 def felix_dataset(
-    logs: List[Path], tasks: Path, output: Path, tasks_out: Path, felix_features: bool
+    logs: List[Path], tasks: Path, output: Path, tasks_out: Path, ansor_features: bool
 ):
     if output.is_file():
         logger.warning(f"Found existing dataset at {output}. Skipping.")
@@ -154,22 +147,24 @@ def felix_dataset(
     logger.info(f"Found {len(logs)} json files.")
     builder = DatasetBuilder()
     for sym_task, inst, filename, configs in load_ansor_configs_stream(tasks_, logs):
-        logger.info(f"Loading task {inst.idx} ({sym_task})")
-        configs = list(configs)  # Only read in the configs now.
-        if felix_features:
-            conf_counter = _add_felix_configs(builder, filename, sym_task, inst, configs)
-        else:
-            inputs, results = utils.transpose2(list(configs))
+        configs = list(configs)  # Only actually read in configs now.
+        costs = [np.array([float(c) for c in res.costs]).mean() for _, res in configs]
+        least5_lat = np.array(sorted(costs)[:5]) * 1e6
+        logger.info(
+            f"""Loaded task {inst.idx} ({sym_task})
+  with sizes {inst.sizes}
+  Top 5 configs (latency in us): {least5_lat}"""
+        )
+        if ansor_features:
+            inputs, results = utils.transpose2(configs)
+            flops = sym_task.get_flops(inst.sizes)
             features, _, _ = get_ansor_features(inputs, results)
-            costs = [np.array([float(c) for c in r.costs]).mean() for r in results]
-            builder.add_configs_(
-                [torch.tensor(f.astype(float)).float() for f in features],
-                sym_task.get_flops(inst.sizes),
-                torch.tensor(costs),
-                {"config_file": filename},
-            )
-            conf_counter = len(features)
-        logger.info("Added %d / %d configs for task", conf_counter, len(configs))
+            features = [torch.tensor(f.astype(float)).float() for f in features]
+            builder.add_configs_(features, flops, torch.tensor(costs), {"config_file": filename})
+            logger.info("Added %d configs for task", len(configs))
+        else:
+            conf_counter = _add_felix_configs(builder, sym_task, inst, configs, filename)
+            logger.info("Added %d / %d configs for task", conf_counter, len(configs))
     torch.save(builder.to_dataset(), output)
 
 

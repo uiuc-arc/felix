@@ -242,11 +242,10 @@ def load_tuned_configs(tasks: List[ansor.SearchTask], config_files: Sequence[Pat
     configs_slots: Dict[str, Tuple[ansor.SearchTask, List[InpResPair]]] = {
         task.workload_key: (task, []) for task in tasks
     }
+    assert len(configs_slots) == len(tasks)
     unknown_keys = set()
     for file in config_files:
         for inp, res in RecordReader(str(file)):
-            if res.error_no != 0:
-                continue
             key = inp.task.workload_key
             if (got := configs_slots.get(key)) is not None:
                 _, slot = got
@@ -255,58 +254,15 @@ def load_tuned_configs(tasks: List[ansor.SearchTask], config_files: Sequence[Pat
                 unknown_keys.add(key)
     if unknown_keys:
         logger.warning("Got unknown keys in configs: %s", unknown_keys)
-    ret: List[List[LoadedConf]] = []
-    for task, slots in configs_slots.values():
-        if not slots:
-            ret.append([])
-            continue
-        assert all(result.error_no == 0 for _, result in slots)
-        flops = task.compute_dag.flop_ct
-        configs = [c | {"flops": flops} for c in process_inp_res_pairs(slots)]
-        ret.append(configs)
-    assert len(ret) == len(tasks)
-    return ret
+    return [slots for _, slots in configs_slots.values()]
 
 
-def process_inp_res_pairs(
-    inp_res: List[InpResPair], ansor_features: bool = True
-) -> List[LoadedConf]:
-    from tvm.auto_scheduler.feature import (
-        get_per_store_features_from_measure_pairs as get_feats,
-    )
-
-    inputs, results = transpose2(inp_res)
-    if ansor_features:
-        features, norm_throughputs, _ = get_feats(inputs, results)
-    else:
-        features = norm_throughputs = []
-    configs = []
-    for i in range(len(inputs)):
-        costs = results[i].costs
-        # mean_cost is FloatImm type before conversion
-        mean_cost = float(sum(costs) / len(costs))
-        state = inputs[i].state
-        config = {
-            "state": state,
-            "backbone": ffi.extract_backbone(state.transform_steps),
-            "var_values": ffi.extract_config_dict(state),
-            "time": mean_cost,
-        }
-        if ansor_features:
-            config["features"] = features[i].astype(float)
-            config["throughput"] = norm_throughputs[i]
-        configs.append(config)
-    return configs
-
-
-def group_configs_by_backbone(
-    configs: List[LoadedConf],
-) -> Dict[tuple, List[LoadedConf]]:
+def group_configs_by_backbone(inp_res_pair: List[InpResPair]) -> Dict[tuple, List[InpResPair]]:
     from collections import defaultdict
 
     ret = defaultdict(list)
-    for conf in configs:
-        ret[conf["backbone"]].append(conf)
+    for inp, res in inp_res_pair:
+        ret[ffi.extract_backbone(inp.state.transform_steps)].append((inp, res))
     return ret
 
 
