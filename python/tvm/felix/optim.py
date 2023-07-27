@@ -125,12 +125,10 @@ class Optimizer:
         measured_top = optimizer.measure_for_dataset(measure_top, measure_rand, builder)
         self.perf_model.train_self(
             builder.to_dataset(),
-            self.perf_model.main_loss,
-            lr=1e-4,
-            weight_decay=1e-6,
             batch_size=32,
             n_epoch=30,
             early_stop=5,
+            lr=1e-4,
         )
         best_actual, best_pred = get_best_configs(measured_top)
         _logger.info(

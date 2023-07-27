@@ -201,10 +201,10 @@ class MLPCostModel(nn.Module):
         dataset: "SegmentDataset",
         loss_func: str,
         lr: float,
-        weight_decay: float,
         batch_size: int,
         n_epoch: int,
         early_stop: int,
+        weight_decay: float = 1e-6,
         grad_clip: float = 0.5,
         print_per_epoches: int = 5,
     ):
@@ -216,7 +216,7 @@ class MLPCostModel(nn.Module):
         logger.info("Dataset size: %d (%d batches)", len(dataset), len(dataloader))
         loss_f = MLPLossFunc(loss_func)
         for epoch in range(n_epoch):
-            epoch_loss = 0.0
+            epoch_losses = []
             for segment_sizes, features, labels, _ in dataloader:
                 segment_sizes = segment_sizes.cuda()
                 features = features.cuda()
@@ -225,8 +225,9 @@ class MLPCostModel(nn.Module):
                 loss = loss_f(self.forward_in_segments(segment_sizes, features), labels)
                 loss.backward()
                 optimizer.step()
-                epoch_loss = moving_average(epoch_loss, loss.item())
+                epoch_losses.append(loss.item())
                 torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)  # type: ignore
+            epoch_loss = sum(epoch_losses) / len(epoch_losses)
             if epoch % print_per_epoches == 0 or epoch == n_epoch - 1:
                 logger.info("Epoch: %d\tEpoch train Loss: %.4f", epoch, epoch_loss)
             # Early stop
@@ -257,6 +258,12 @@ class DatasetBuilder:
             self.features.append(feats)
             self.labels.append((flops, latency.item()))
             self.conf_meta.append(conf_meta)
+
+    def add_dataset(self, dataset: "SegmentDataset"):
+        self.features.extend([dataset.features[begin:end] for begin, end in dataset.segment_ranges])
+        self.labels.extend(dataset.flops_lats.tolist())
+        if dataset.conf_meta is not None:
+            self.conf_meta.extend(dataset.conf_meta)
 
     def to_dataset(self, use_latency: bool = True):
         seg_size = torch.tensor([f.shape[0] for f in self.features])

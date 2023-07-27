@@ -1,16 +1,22 @@
 import logging
 from pathlib import Path
-from typing import Union
+from typing import List, Union
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.utils import data
 from tvm.auto_scheduler import cost_model as cm
-from tvm.auto_scheduler.cost_model import MLPCostModel
+from tvm.auto_scheduler.cost_model import DatasetBuilder, MLPCostModel
+from tvm.auto_scheduler.feature import (
+    get_per_store_features_from_measure_pairs as get_ansor_features,
+)
 
-from .utils import transpose2
+from . import ffi
+from .sym_task import SymTask, TaskInstance
+from .utils import InpResPair, group_configs_by_backbone, transpose2
 
-__all__ = ["MLPCostModel", "MLPModelPLWrapper"]
+__all__ = ["MLPCostModel", "MLPModelPLWrapper", "DatasetBuilder", "add_to_dataset_builder"]
 logger = logging.getLogger(__name__)
 
 PathLike = Union[str, Path]
@@ -123,3 +129,52 @@ class MLPModelPLWrapper(MLPCostModel, pl.LightningModule):
 
     def output_to_performance(self, flops, output):
         return super().output_to_performance(self.main_loss, self.use_latency, flops, output)
+
+    def train_self(self, dataset, batch_size: int, n_epoch: int, early_stop: int, lr: float = 7e-4):
+        dataset.use_latency = self.use_latency
+        super().train_self(dataset, self.main_loss, lr, batch_size, n_epoch, early_stop, self.wd)
+
+
+def add_to_dataset_builder(
+    builder: DatasetBuilder,
+    sym_task: SymTask,
+    inst: TaskInstance,
+    inp_res_pairs: List[InpResPair],
+    ansor_features: bool,
+    metadata=None,
+):
+    metadata = metadata or {}
+    costs = [torch.tensor([float(c) for c in res.costs]).mean().item() for _, res in inp_res_pairs]
+    if ansor_features:
+        inputs, results = transpose2(inp_res_pairs)
+        flops = sym_task.get_flops(inst.sizes)
+        features, _, _ = get_ansor_features(inputs, results)
+        features = [torch.tensor(f.astype(float)).float() for f in features]
+        builder.add_configs_(features, flops, torch.tensor(costs), metadata)
+        logger.info("Added %d configs for task", len(inp_res_pairs))
+    else:
+        conf_counter = 0
+        flops = sym_task.get_flops(inst.sizes)
+        for backbone, configs_ in group_configs_by_backbone(inp_res_pairs).items():
+            sketch = sym_task.find_sketch(backbone)
+            assert sketch is not None
+            feature_f = sketch.fetch_features(inst.sizes, prime_factorize=False)
+            assert feature_f is not None
+            var_values = [dict(ffi.extract_config_dict(inp.state)) for inp, _ in configs_]
+            our_feats, _ = feature_f.run_on_initial_configs(var_values)
+            for (_, res), feats in zip(configs_, our_feats):
+                nan_or_inf = torch.isnan(feats).any() or torch.isinf(feats).any()
+                # Anything more than 100 (heuristically chosen) is probably a bug
+                # because the features are already log-scaled.
+                large_magnitude = torch.abs(feats).max() > 100
+                if nan_or_inf or large_magnitude:
+                    continue
+                cost = np.array([float(x) for x in res.costs]).mean()
+                metadata_ = {
+                    "task_idx": inst.idx,
+                    "n_steps": len(backbone),
+                    **metadata,
+                }
+                builder.add_config_(feats, flops, cost, metadata_)
+                conf_counter += 1
+        logger.info("Added %d / %d configs for task", conf_counter, len(inp_res_pairs))
