@@ -26,14 +26,11 @@ import org.apache.tvm.rpc.ConnectTrackerServerProcessor;
  * Connect to RPC proxy and deal with requests.
  */
 class RPCProcessor extends Thread {
-  private String host;
+  private String host, selfReportHost, key;
   private int port;
-  private String key;
   private boolean running = false;
-  private long startTime;
   private ConnectTrackerServerProcessor currProcessor;
-  private boolean first = true;
-  private Activity rpc_activity = null;
+  private final Activity rpc_activity;
 
   public RPCProcessor(Activity activity) {
     super();
@@ -53,7 +50,7 @@ class RPCProcessor extends Thread {
           }
         }
         try {
-          currProcessor = new ConnectTrackerServerProcessor(host, port, key, watchdog);
+          currProcessor = new ConnectTrackerServerProcessor(host, selfReportHost, port, key, watchdog);
         } catch (Throwable e) {
           e.printStackTrace();
           // kill if creating a new processor failed
@@ -84,8 +81,9 @@ class RPCProcessor extends Thread {
    * @param port proxy server port.
    * @param key proxy server key.
    */
-  synchronized void connect(String host, int port, String key) {
+  synchronized void connect(String host, String selfReportHost, int port, String key) {
     this.host = host;
+    this.selfReportHost = selfReportHost;
     this.port = port;
     this.key = key;
     running = true;

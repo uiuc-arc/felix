@@ -25,11 +25,13 @@ under the License.
     <string name="input_address">Enter the tracker server address</string>
     <string name="input_port">Enter the tracker server port</string>
     <string name="input_key">Enter the app connection key</string>
+    <string name="input_custom_addr">Enter this device\'s own IP</string>
 
     <string name="label_address">Address</string>
     <string name="label_port">Port</string>
     <string name="label_key">Key</string>
-    <string name="label_persistent">Enable RPC</string>
+    <string name="label_start">Start RPC</string>
+    <string name="label_custom_addr">Custom Self address (optional)</string>
 
     <string name="switch_on">Enabled</string>
     <string name="switch_off">Disabled</string>

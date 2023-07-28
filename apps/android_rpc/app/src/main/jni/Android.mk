@@ -43,7 +43,7 @@ LOCAL_C_INCLUDES := $(ROOT_PATH)/include \
 LOCAL_MODULE = tvm4j_runtime_packed
 
 LOCAL_CPP_FEATURES += exceptions
-LOCAL_LDLIBS += -latomic
+# LOCAL_LDLIBS += -latomic
 LOCAL_ARM_MODE := arm
 
 ifdef ADD_C_INCLUDES

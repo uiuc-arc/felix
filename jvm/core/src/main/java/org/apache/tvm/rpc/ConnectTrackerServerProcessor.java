@@ -37,7 +37,7 @@ import java.net.SocketTimeoutException;
  */
 public class ConnectTrackerServerProcessor implements ServerProcessor {
   private ServerSocket server;
-  private final String trackerHost;
+  private final String trackerHost, selfReportHost;
   private final int trackerPort;
   // device key
   private final String key;
@@ -64,7 +64,7 @@ public class ConnectTrackerServerProcessor implements ServerProcessor {
    * @param watchdog watch for timeout, etc.
    * @throws java.io.IOException when socket fails to open.
    */
-  public ConnectTrackerServerProcessor(String trackerHost, int trackerPort, String key,
+  public ConnectTrackerServerProcessor(String trackerHost, String selfReportHost, int trackerPort, String key,
       RPCWatchdog watchdog) throws IOException {
     while (true) {
       try {
@@ -82,6 +82,7 @@ public class ConnectTrackerServerProcessor implements ServerProcessor {
     }
     System.err.println("using port: " + serverPort);
     this.trackerHost = trackerHost;
+    this.selfReportHost = selfReportHost;
     this.trackerPort = trackerPort;
     this.key = key;
     this.matchKey = key + ":" + Math.random();
@@ -215,7 +216,7 @@ public class ConnectTrackerServerProcessor implements ServerProcessor {
     OutputStream trackerOut = trackerSocket.getOutputStream();
     // send a JSON with PUT, device key, RPC server port, and the randomly
     // generated key
-    String putJSON = generatePut(RPC.TrackerCode.PUT, key, serverPort, matchKey);
+    String putJSON = generatePut(RPC.TrackerCode.PUT, key, serverPort, matchKey, this.selfReportHost);
     Utils.sendString(trackerOut, putJSON);
     int recvCode = Integer.parseInt(Utils.recvString(trackerIn));
     if (recvCode != RPC.TrackerCode.SUCCESS) {
@@ -249,9 +250,13 @@ public class ConnectTrackerServerProcessor implements ServerProcessor {
   }
 
   // handcrafted JSON
-  private String generatePut(int code, String key, int port, String matchKey) {
-    return "[" + code + ", " + "\"" + key + "\"" + ", " + "[" + port + ", "
-            + "\"" + matchKey +  "\"" + "]" + ", " + "null" + "]";
+  private String generatePut(int code, String key, int port, String matchKey, String customAddr) {
+    String ret = "[" + code + ", \"" + key + "\", [" + port + ", \"" + matchKey + "\"], ";
+    if (customAddr != null) {
+      return ret + "\"" + customAddr + "\"]";
+    } else {
+      return ret + "null]";
+    }
   }
 
   // handcrafted JSON

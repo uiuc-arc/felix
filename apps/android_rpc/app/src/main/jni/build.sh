@@ -15,7 +15,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-PATH="$PATH:/usr/local/bin"
+PATH="$PATH:/home/evanzhao/packages/ndk/25.2.9519653"
 CURR_DIR=$(cd `dirname $0`; pwd)
 ROOT_DIR="$CURR_DIR/../../../../../.."
 javac -h $CURR_DIR -classpath "$ROOT_DIR/jvm/core/target/*" $ROOT_DIR/jvm/core/src/main/java/org/apache/tvm/LibInfo.java || exit -1

@@ -7,3 +7,6 @@
 /build
 /captures
 .externalNativeBuild
+app/src/main/jni/
+app/src/main/obj/
+gradle/
