@@ -630,24 +630,29 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
 
   void VisitStmt_(const BufferStoreNode* node) final {
     PrimExpr loop_prod = LoopProd(FilterForLoops(std::nullopt));
+    if (!this->bufstore_feats.count(node->buffer)) {
+      size_t size = this->bufstore_feats.size();
+      this->bufstore_feats[node->buffer] = {FeatureSet{}, size};
+    }
+    FeatureSet& fea = this->bufstore_feats[node->buffer].first;
 
     // Group 1: Computation related features
     MathOpCounter moc(this->rinf);
     moc(node->value);
-    ExtractComputationFeature(node, moc, loop_prod);
+    ExtractComputationFeature(fea, moc, loop_prod);
 
     // Group 2: Buffer access related features (per buffer)
     std::vector<PrimExpr> mem_bytes_list, compute_ops_list;
     PrimExpr cur_compute_ops;
-    ExtractBufferAccessFeature(node, moc, loop_prod, &cur_compute_ops, &compute_ops_list,
-                               &mem_bytes_list);
+    ExtractBufferAccessFeature(fea.access_feas, node, moc, loop_prod, &cur_compute_ops,
+                               &compute_ops_list, &mem_bytes_list);
 
     // Group 3: Arithmetic intensity related features
     // LOG_WARNING << "ExtractArithmeticIntensityFeature is unsupported yet";
     // ExtractArithmeticIntensityFeature(node, cur_compute_ops, compute_ops_list, mem_bytes_list);
 
     // Group 5: Outer scope related features
-    ExtractOuterScopeFeature(node, loop_prod);
+    ExtractOuterScopeFeature(fea, loop_prod);
   }
 
   void VisitStmt_(const BufferRealizeNode* node) final {
@@ -658,11 +663,9 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
   }
 
   // Extract computation related features (group 1)
-  void ExtractComputationFeature(const BufferStoreNode* node, const MathOpCounter& moc,
+  void ExtractComputationFeature(FeatureSet& fea, const MathOpCounter& moc,
                                  const PrimExpr& loop_prod) {
     // Computation related features
-    FeatureSet& fea = bufstore_feats[node->buffer];
-
     fea.float_mad = loop_prod * (int)moc.float_mad;
     fea.float_addsub = loop_prod * (int)moc.float_addsub;
     fea.float_mul = loop_prod * (int)moc.float_mul;
@@ -702,11 +705,11 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
   }
 
   // Extract buffer access related features (group 2)
-  void ExtractBufferAccessFeature(const BufferStoreNode* node, const MathOpCounter& moc,
+  void ExtractBufferAccessFeature(std::vector<BufferAccessFeature>& acc_feas,
+                                  const BufferStoreNode* node, const MathOpCounter& moc,
                                   PrimExpr loop_prod, PrimExpr* cur_compute_ops,
                                   std::vector<PrimExpr>* compute_ops_list,
                                   std::vector<PrimExpr>* mem_bytes_list) {
-    std::vector<BufferAccessFeature>& acc_feas = bufstore_feats[node->buffer].access_feas;
     // We may have multiple bufferstore nodes for the same buffer (e.g., 1 for initializing an
     // array, and 1 for computing it). In that case, delibrately overwrite the previous result.
     acc_feas.clear();
@@ -838,7 +841,7 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
 
   // Extract allocation related features (group 4)
   void ExtractAllocationFeature(const BufferRealizeNode* node) {
-    FeatureSet& fea = bufstore_feats[node->buffer];
+    FeatureSet& fea = bufstore_feats.at(node->buffer).first;
     PrimExpr allocation_size = 1;
     for (const auto& x : node->bounds) {
       allocation_size *= this->rinf.GetMax(x->extent);
@@ -853,8 +856,7 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
   }
 
   // Extract outer scope related features (group 5)
-  void ExtractOuterScopeFeature(const BufferStoreNode* node, const PrimExpr& loop_prod) {
-    FeatureSet& fea = bufstore_feats[node->buffer];
+  void ExtractOuterScopeFeature(FeatureSet& fea, const PrimExpr& loop_prod) {
     fea.outer_prod = loop_prod;
     fea.num_loops = CountLoops(for_loop_stack);
     fea.auto_unroll_max_step = cur_auto_unroll_max_step_;
@@ -912,7 +914,7 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
   }
 
  public:
-  BufferMap<FeatureSet> bufstore_feats;
+  BufferMap<std::pair<FeatureSet, size_t>> bufstore_feats;
 
  private:
   // The shared arithmetic analyzers
@@ -942,15 +944,17 @@ VarDefStack GetPerStoreFeatureExpr(const Stmt& stmt, VarDefStackNode& vdefs, Ran
   // Extract features
   PerStoreFeatureExtractor extractor(vdefs, rinf, cache_line_size);
   extractor(stmt);
-  std::vector<std::pair<Buffer, FeatureSet>> buffer_features(extractor.bufstore_feats.begin(),
-                                                             extractor.bufstore_feats.end());
+  std::vector<std::tuple<Buffer, FeatureSet, size_t>> buffer_features;
+  for (auto& [buf, fea] : extractor.bufstore_feats) {
+    buffer_features.emplace_back(buf, fea.first, fea.second);
+  }
   std::sort(buffer_features.begin(), buffer_features.end(),
-            [](auto& a, auto& b) { return a.first->name < b.first->name; });
+            [](auto& a, auto& b) { return std::get<2>(a) < std::get<2>(b); });
 
   // Define features in context, and put the resulted variable names in ret.
   VarDefStack feats;
   for (size_t i = 0; i < buffer_features.size(); ++i) {
-    auto& [buf, fea_set] = buffer_features[i];
+    auto& [buf, fea_set, idx] = buffer_features[i];
     auto PushFeature = [&i, &feats](const std::string& name, const PrimExpr& val,
                                     PrimExpr default_) {
       auto name_ = "BS" + std::to_string(i) + "." + name;
