@@ -16,7 +16,7 @@ from tvm.auto_scheduler.measure_record import dump_record_to_string
 from . import ffi
 from .cost_model import MLPModelPLWrapper
 from .sym_task import Sketch, SymTask, TaskInstance
-from .utils import MEASURER, transpose2
+from .utils import make_runner, transpose2
 
 _logger = logging.getLogger(__name__)
 __all__ = ["Optimizer"]
@@ -298,7 +298,7 @@ def get_best_configs(configs: List[ConfigInfo]):
 def measure_configs_latency_(configs: List[ConfigInfo]):
     from tvm.auto_scheduler.measure import ProgramMeasurer
 
-    measurer = ProgramMeasurer(ansor.LocalBuilder(), MEASURER, [], False)
+    measurer = ProgramMeasurer(ansor.LocalBuilder(), make_runner(), [], False)
     results = ffi.measure_performance(measurer, [c.get_measure_input() for c in configs])
     for c, result in zip(configs, results):
         if result.error_no != 0:
@@ -309,11 +309,18 @@ def measure_configs_latency_(configs: List[ConfigInfo]):
 
 class TaskPerfFunc(nn.Module):
     def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPModelPLWrapper) -> None:
+        from .sym_dag import Conv
+
         super().__init__()
         self.sym_task = task
         self.sizes = sizes
         self.ansor_task, _ = task.make_concrete_task(sizes)
-        sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in task.sketches]
+
+        # HACK: remove first sketch of Conv2/3d as its performance tends to be overestimated
+        # and can actually be selected instead of the second sketch when it should not.
+        has_conv = any(isinstance(n, Conv) for n in task.dag_nodes())
+        sketches = task.sketches[1:] if has_conv else task.sketches
+        sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in sketches]
         self._sketches = nn.ModuleList(sketches)
         self.perf_model = perf_model
         self.flops = task.get_flops(sizes)

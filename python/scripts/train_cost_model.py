@@ -55,8 +55,10 @@ def parse_args():
     tr_mlp.add_argument("--train-ratio", type=float, default=0.9)
     tr_mlp.add_argument("--min-lat", type=float)
     tr_mlp.add_argument("--max-lat", type=float)
-    tr_mlp.add_argument("--use-latency", action="store_true")
-    tr_mlp.add_argument("--loss-f", type=str, choices=["mse", "log_mse", "rank"], default="log_mse")
+    tr_mlp.add_argument("--use-flops", action="store_true")
+    tr_mlp.add_argument(
+        "--loss-f", type=str, choices=["mse", "log_mse", "log_rel_err", "rank"], default="log_mse"
+    )
     tr_mlp.set_defaults(func=lambda args: train_mlp(**varargs(args)))
 
     tr_xgb = commands.add_parser("train_xgb")
@@ -314,7 +316,7 @@ def train_mlp(
     train_ratio: float,
     min_lat: Optional[float],
     max_lat: Optional[float],
-    use_latency: bool,
+    use_flops: bool,
     tasks,
 ):
     import pytorch_lightning as pl
@@ -324,7 +326,7 @@ def train_mlp(
     assert isinstance(dataset_, SegmentDataset)
     # We don't need this and manipulating it is slow; setting it to None will speed up the training.
     dataset_.conf_meta = None
-    pred_model = felix.MLPModelPLWrapper(dataset_.features.shape[1], loss_f, use_latency)
+    pred_model = felix.MLPModelPLWrapper(dataset_.features.shape[1], loss_f, not use_flops)
     pred_model.set_dataset_(select_dataset_by_lat(dataset_, min_lat, max_lat), train_ratio)
     val_loss = pred_model.val_loss_name
     filename = "epoch={epoch:02d}-loss={%s:.4f}" % val_loss

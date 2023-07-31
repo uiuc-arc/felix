@@ -14,7 +14,7 @@ __all__ = ["ansor_tune_full", "ansor_tune_one_round", "get_ansor_best", "make_an
 
 def ansor_tune_full(
     tasks: List[utils.AnsorTaskWeight],
-    cost_model_path: Optional[str],
+    cost_model_path: Optional[utils.PathLike],
     json_log: Optional[utils.PathLike],
     n_total_measure: int,
     pop_size: int = 2048,
@@ -25,6 +25,7 @@ def ansor_tune_full(
     tuning_options = ansor.TuningOptions(
         num_measure_trials=n_total_measure,
         num_measures_per_round=round_n_measure,
+        runner=utils.make_runner(),
         measure_callbacks=[ansor.RecordToFile(tuner.load_log_file)],
     )
     tuner.tune(
@@ -50,7 +51,7 @@ def ansor_tune_one_round(
     tuner.early_stopping_task = 1e20
     tuner.measurer = ansor.measure.ProgramMeasurer(
         ansor.LocalBuilder(),
-        ansor.LocalRunner(),
+        utils.make_runner(),
         [ansor.RecordToFile(tuner.load_log_file)],
         verbose=1,
     )
@@ -92,12 +93,17 @@ def get_ansor_best(tasks: List[utils.AnsorTaskWeight], config_file: utils.PathLi
         configs.append((task_idx, inp, res))
     task_cur_best = [float("inf") for _ in tasks]
     task_best_history = []
+    timestamps = []
     for task_idx, inp, res in configs:
         if res.error_no == 0:
             cost = float(sum(res.costs) / len(res.costs))
             task_cur_best[task_idx] = min(task_cur_best[task_idx], cost)
         task_best_history.append(np.array(task_cur_best))
-    return np.array(task_best_history)  # [n_steps, n_tasks]
+        timestamps.append(res.timestamp)
+    if not timestamps:
+        return np.array([]), np.zeros((0, len(tasks_by_key)))
+    durations = np.array(timestamps) - timestamps[0]
+    return durations, np.array(task_best_history)  # [n_steps], [n_steps, n_tasks]
 
 
 def make_ansor_tuner(

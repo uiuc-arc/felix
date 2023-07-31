@@ -277,7 +277,7 @@ CONFIGS = {
 def get_eval_config(custom_kwargs):
     from argparse import Namespace
 
-    return Namespace(**b16_config, num_classes=1000, image_size=384, **custom_kwargs)
+    return Namespace(**b32_config, num_classes=1000, image_size=224, **custom_kwargs)
 
 
 def vit(**vit_kwargs):

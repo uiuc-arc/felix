@@ -22,19 +22,19 @@ The details of the "gradient" strategy below can be found in the section 6 of th
 L. Zheng, C. Jia, M. Sun, Z. Wu, C. Yu, et al. "Ansor : Generating High-Performance Tensor
 Programs for Deep Learning." (OSDI 2020).
 """
+import logging
+import math
 import os
 import time
-import math
-import logging
 
 import numpy as np
 
-from .search_policy import SearchPolicy, SketchPolicy, PreloadMeasuredStates
+from . import _ffi_api
 from .cost_model import RandomModel, XGBModel
-from .utils import array_mean
 from .measure import ProgramMeasurer
 from .measure_record import RecordReader
-from . import _ffi_api
+from .search_policy import PreloadMeasuredStates, SearchPolicy, SketchPolicy
+from .utils import array_mean
 
 logger = logging.getLogger("auto_scheduler")
 
@@ -306,6 +306,9 @@ class TaskScheduler:
         per_task_early_stopping : Optional[int]
             Stop tuning a task early if getting no improvement after n measurements.
         """
+        from .measure import MeasureInput, MeasureResult
+        from .measure_record import save_records
+
         # init members
         self.tune_option = tune_option
         self.early_stopping_all = (
@@ -349,6 +352,16 @@ class TaskScheduler:
             self.load_log_file,
             adapative_training,
         )
+
+        if self.load_log_file:
+            # Add a dummy entry to record tuning start time
+            sample_task = self.tasks[0]
+            sample_pol = self.search_policies[0]  # type: ignore
+            sample_state = sample_pol.sample_initial_population()[0]
+            dummy_input = MeasureInput(sample_task, sample_state)
+            save_records(
+                self.load_log_file, [dummy_input], [MeasureResult([1e10], 0, "", 0, time.time())]
+            )
 
         # do a round robin first to warm up
         for idx in range(len(self.tasks)):

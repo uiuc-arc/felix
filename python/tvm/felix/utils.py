@@ -19,9 +19,9 @@ from tvm.relay.backend.executor_factory import GraphExecutorFactoryModule
 from . import ffi
 
 logger = logging.getLogger(__file__)
-__all__ = ["TARGET", "HW_PARAMS", "MEASURER"]
+__all__ = ["TARGET", "HW_PARAMS", "make_runner"]
 
-TARGET = tvm.target.cuda(model="a5000", arch="sm_80")
+TARGET = tvm.target.cuda(model="a5000", arch="sm_80").with_host(tvm.target.Target("llvm"))
 HW_PARAMS = ansor.HardwareParams(
     num_cores=-1,
     vector_unit_bytes=16,
@@ -32,13 +32,17 @@ HW_PARAMS = ansor.HardwareParams(
     max_vthread_extent=8,
     warp_size=32,
 )
-MEASURER = ansor.LocalRunner()
 
 PathLike = ty.Union[Path, str]
 InputSpec = Union[torch.Tensor, List[torch.Tensor]]
 AnsorTaskWeight = Tuple[ansor.SearchTask, int]
 InpResPair = Tuple[ansor.MeasureInput, ansor.MeasureResult]
 LoadedConf = Dict[str, Any]
+
+
+def make_runner(**kwargs):
+    # Can be replaced with RPCRunner on specific devices
+    return ansor.measure.LocalRunner(**kwargs)
 
 
 @dataclass

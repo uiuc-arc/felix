@@ -92,6 +92,7 @@ def get_confs_to_measure(taskr: TaskRecord, cost_model, n_total, n_best):
         sorted_indices = torch.argsort(predictions, descending=True)
         best_idx, rest = sorted_indices[:n_best], sorted_indices[n_best:]
         n_rand = n_total - n_best
+        assert n_rand >= 0
         rand_idx = rest[torch.randperm(len(rest))[:n_rand]]
         pred_usec = 1e6 / torch.exp(predictions[best_idx])
         logger.info(f"{n_best} best configs with predicted costs (usecs)\n  %s", pred_usec)
@@ -201,6 +202,7 @@ def main():
         dbuilder.add_dataset(dataset)
     if (model_ckpt := params["initial_model"]) is not None:
         cost_model = felix.MLPModelPLWrapper.load_from_checkpoint(model_ckpt)
+        assert cost_model.use_latency
     else:
         if dataset_path is None:
             dataset = measure_on_all_tasks(
