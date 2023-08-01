@@ -3,15 +3,14 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Callable, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 from torch import Tensor, nn, optim
 from torch.optim import lr_scheduler as lrs
-from tqdm import tqdm, trange
 from tvm import auto_scheduler as ansor
 from tvm.auto_scheduler.cost_model import DatasetBuilder, LatAndThruput, Performance
-from tvm.auto_scheduler.measure_record import dump_record_to_string
+from tvm.auto_scheduler.measure_record import save_records
 
 from . import ffi
 from .cost_model import MLPModelPLWrapper
@@ -24,215 +23,214 @@ PathLike = Union[Path, str]
 
 
 class Optimizer:
+    ALPHA, BETA = 0.2, 2
+    BW_WINDOW_SIZE = 3
+
     def __init__(
         self, tasks: List[Tuple[SymTask, TaskInstance]], perf_model: MLPModelPLWrapper
     ) -> None:
         self.timer = Timer()
-        self.tasks: Dict[int, Tuple[TaskPerfFunc, int]] = {}
-        for sym_task, inst in tqdm(tasks):
-            with self.timer.time(f"create[{inst.idx}]"):
-                task_f = TaskPerfFunc(sym_task, inst.sizes, perf_model)
-            self.tasks[inst.idx] = task_f, inst.weight
+        _logger.info("Extracting features from tasks...")
+        tasks = sorted(tasks, key=lambda x: x[1].idx)
+        self.tasks = [
+            (TaskPerfFunc(sym, inst.sizes, perf_model), inst.weight, inst.idx)
+            for sym, inst in tasks
+        ]
         self.perf_model = perf_model
+        self.dead_tasks = []
+        self.n_measure, self.n_rounds = 0, 0
+        self.data_builder = DatasetBuilder()
+        self.output_file = None
 
-    def tune_one_round(
+    def tune(
         self,
-        n_configs: int,
-        n_optim_steps: int,
         n_measurements: int,
-        log_file: Optional[PathLike] = None,
-        lr: float = 0.5,
-    ):
-        results = {}
-        for idx, (task_perf_f, weight) in self.tasks.items():
-            optimizer = SingleRoundTaskOptimizer(task_perf_f, n_configs, n_optim_steps, lr)
-            _logger.info(f"Tuning for task {idx}")
-            with self.timer.time(f"tune[{idx}]"):
-                for _ in trange(n_optim_steps):
-                    optimizer.optimize_step()
-                configs = optimizer.get_best_configs()
-            _logger.info("Measuring latency of best configs empirically...")
-            assert idx not in results
-            results[idx] = configs
-            best_pred_perf = max([c.pred_perf for c in configs], default=None)
-            _logger.info(f"Task {idx}: best predicted {best_pred_perf} (weight = {weight})")
-        to_measure = [c for task_idx in self.tasks for c in results[task_idx][:n_measurements]]
-        with self.timer.time(f"measure"):
-            measure_configs_latency_(to_measure)
-        self._summarize(results, log_file)
-        return results
-
-    def tune_multi_rounds(
-        self,
-        n_configs: int,
-        n_first_round_steps: int,
-        n_latter_round_steps: int,
-        n_rounds: int,
+        n_config_seeds: int,
+        n_grad_steps: int,
         measure_per_round: int,
         log_file: Optional[PathLike] = None,
     ):
-        results = {}
-        builder = DatasetBuilder()
-        n1, n2, n3 = n_first_round_steps, n_latter_round_steps, measure_per_round
-        for idx, (task_perf_f, weight) in self.tasks.items():
-            results[idx] = results_ = []
-            optimizer = MultiRoundTaskOptimizer(task_perf_f, n_configs, n1, n2)
-            for round in range(0, n_rounds):
-                _logger.info(f"Round {round}:")
-                if round == 0:
-                    mtop = self._do_one_task_one_round(optimizer, builder, weight, n1, n3, 0)
-                else:
-                    mtop = self._do_one_task_one_round(
-                        optimizer, builder, weight, n2, n3 // 2, n3 - n3 // 2
-                    )
-                results_.extend(mtop)
-                best_actual, best_pred = get_best_configs(results_)
-                _logger.info(
-                    f"Overall: best measured {best_actual}, best predicted {best_pred} (weight = {weight})"
-                )
-        self._summarize(results, log_file)
-
-    def _summarize(self, results: dict, log_file):
-        total_lat = 0
-        configs = []
-        for idx in self.tasks:
-            configs_ = results[idx]
-            weight = self.tasks[idx][1]
-            best_actual, best_predicted = get_best_configs(configs_)
-            _logger.info(
-                f"Task {idx}: best measured {best_actual}, best predicted {best_predicted} (weight = {self.tasks[idx][1]})"
+        lr_sched_f = lambda optim: lrs.MultiStepLR(
+            optim, milestones=[int(n_grad_steps * 0.6)], gamma=0.2
+        )
+        optims = [
+            SingleTaskOptimizer(perf_f, n_config_seeds, lr_sched_f) for perf_f, _, _ in self.tasks
+        ]
+        self.output_file = log_file
+        # A round of warmup for each task
+        for idx in range(len(self.tasks)):
+            self._do_one_task_one_round(idx, optims[idx], n_grad_steps, measure_per_round, 0)
+        self._print_total_latency(optims)
+        # Keep tuning till we run out of budget
+        while self.n_measure < n_measurements and len(self.dead_tasks) < len(self.tasks):
+            next_task = self._gradient_sched(optims)
+            self._do_one_task_one_round(
+                next_task, optims[next_task], n_grad_steps, measure_per_round, 0
             )
-            if best_actual is not None:
-                total_lat += best_actual.latency_us * weight
-            configs += configs_
-        if log_file is not None:
-            output_json_lines = [c.to_tvm_string() for c in configs]
-            with open(log_file, "w") as f:
-                f.writelines(output_json_lines)
+            self._print_total_latency(optims)
+        self._summarize(optims, log_file)
+
+    def _print_total_latency(self, optims):
+        best_costs = torch.tensor([optim.least_lat_history[-1] for optim in optims])
+        if torch.any(best_costs == 1e10):
+            return None
+        weights = torch.tensor([weight for _, weight, _ in self.tasks])
+        if (tlat := (best_costs * weights).sum().item()) is not None:
+            _logger.info(f"Network total latency: {tlat * 1e6:.2f} us")
+
+    def _summarize(self, optims: List["SingleTaskOptimizer"], log_file: Optional[PathLike]):
+        total_lat = 0
+        for idx in range(len(self.tasks)):
+            optim = optims[idx]
+            _, weight, idx_ = self.tasks[idx]
+            best = optim.least_lat_history[-1] * 1e6
+            _logger.info(f"Task {idx_}: {best} us * {weight}")
+            total_lat += best * weight
         _logger.info("Total latency: %.2f us", total_lat)
 
     def _do_one_task_one_round(
-        self,
-        optimizer: "MultiRoundTaskOptimizer",
-        builder: DatasetBuilder,
-        weight: int,
-        n_steps: int,
-        measure_top: int,
-        measure_rand: int,
+        self, task_idx: int, optimizer, n_steps: int, n_top: int, n_rand: int
     ):
-        for _ in trange(n_steps):
-            optimizer.optimize_step()
-        measured_top = optimizer.measure_for_dataset(measure_top, measure_rand, builder)
-        self.perf_model.train_self(
-            builder.to_dataset(),
-            batch_size=32,
-            n_epoch=30,
-            early_stop=5,
-            lr=1e-4,
-        )
-        best_actual, best_pred = get_best_configs(measured_top)
+        _, weight, idx = self.tasks[task_idx]
+        _logger.info(f"Round {self.n_rounds} (task {idx}):")
+        # train performance model
+        if len(self.data_builder) < 32 * 4:
+            _logger.info(f"Dataset size {len(self.data_builder)} is too small, skipping training")
+        else:
+            dataset = self.data_builder.to_dataset()
+            n_batches = int(30000 / len(dataset))
+            n_early_stop = n_batches // 5
+            self.perf_model.train_self(
+                self.data_builder.to_dataset(), 32, n_batches, n_early_stop, 1e-4
+            )
+        sorted_configs = optimizer.optimize_round(n_steps)
+        measured = optimizer.measure_configs(sorted_configs, n_top, n_rand, self.data_builder)
+        if self.output_file is not None:
+            mis = [c.get_measure_input() for c in measured]
+            mrs = [c.get_measure_result() for c in measured]
+            save_records(str(self.output_file), mis, mrs)
+        best_actual, best_pred = get_best_configs(measured)
+        self.n_measure += len(measured)
+        self.n_rounds += 1
         _logger.info(
-            f"This round: best measured {best_actual}, best predicted {best_pred} (weight = {weight})"
+            f"Task {idx}: best measured {best_actual}, best predicted {best_pred} (weight = {weight})"
+            f"\n  task history best {optimizer.least_lat_history[-1] * 1e6:.2f} us"
+            f"\n  {self.n_measure} measurements done"
         )
-        return measured_top
+        return measured
+
+    def _gradient_sched(self, optims: List["SingleTaskOptimizer"]) -> int:
+        def bgrad(hist):
+            if len(hist) >= self.BW_WINDOW_SIZE + 1:
+                return (hist[-1] - hist[-1 - self.BW_WINDOW_SIZE]) / self.BW_WINDOW_SIZE
+            else:
+                return 0
+
+        n = len(self.tasks)
+        gradients = torch.zeros(n)
+        # for idx in self.dead_tasks:
+        #     gradients[idx] = 0
+        best_costs = torch.tensor([optim.least_lat_history[-1] for optim in optims])
+        task_rounds = torch.tensor([len(optim.least_lat_history) for optim in optims])
+        # compute gradient from chain rule : (delta f / delta g_i)
+        chain_grad = torch.tensor([weight for _, weight, _ in self.tasks])
+        # compute (g_i(t_i) - g(t_i - \Delta t)) / (\Delta t)
+        backward_grad = torch.tensor([bgrad(optim.least_lat_history) for optim in optims])
+        # compute (g_i(t_i + \Delta t) - g(t_i)) / (\Delta t)
+        g_next_1 = best_costs - (best_costs / task_rounds)
+        g_next_2 = torch.ones(n) * self.BETA * 1e30  # FIXME: g_next_2 disabled for now
+        forward_grad = torch.minimum(g_next_1, g_next_2) - best_costs
+        gradients = chain_grad * (self.ALPHA * backward_grad + (1 - self.ALPHA) * forward_grad)
+        assert torch.all(gradients <= 0)
+        # group_id = self.tag_to_group_id.get(self.task_tags[i], None)
+        # if group_id is not None and len(self.group_task_ids[group_id]) > 1:
+        #     best_flops = max(
+        #         [self.flop_cts[j] / best_costs[j] for j in self.group_task_ids[group_id]]
+        #     )
+        #     g_next_2 = self.beta * self.flop_cts[i] / best_flops
+        if gradients.max() == gradients.min():
+            return int(torch.randint(0, n, (1,)).item())
+        else:
+            return int(torch.argmin(gradients).item())
 
 
-class TaskOptimizer:
-    CK = 1
+class SingleTaskOptimizer:
+    GRAD_RATIO_TARGET = 5
 
-    def __init__(
-        self,
-        task_f: "TaskPerfFunc",
-        configs: List[Tensor],
-        optim: optim.Optimizer,
-        lr_sched: Optional[lrs._LRScheduler],
-    ) -> None:
+    def __init__(self, task_f: "TaskPerfFunc", n_seeds: int, lr_sched_f: Callable) -> None:
         self.task_f = task_f
-        self.configs = configs
-        self.optim = optim
-        self.lr_sched = lr_sched
-        # self._configs: [n_steps] x [n_sketches] x [n_configs, n_params]
-        self._configs: List[List[Tensor]] = []
-        self._step_idx = 0
+        self.n_seeds = n_seeds
+        self.configs = task_f.rand_configs(n_seeds)
+        self.optim = optim.Adam(self.configs, lr=0.5)
+        self.lr_sched = lr_sched_f(self.optim)
+        self.least_lat_history = []
+        self._dict_conf_hist = set()
 
-    def optimize_step(self):
+    def optimize_round(self, n_steps: int):
+        # conf_hist: [n_steps] x [n_sketches] x [n_configs, n_params]
+        conf_hist: List[List[Tensor]] = []
+        for step_idx in range(n_steps):
+            self.optimize_step(step_idx)
+            # Keep a history of config values.
+            conf_hist.append([c.clone().detach() for c in self.configs])
+        # configs: [n_sketches] x [n_steps x n_configs, n_params]
+        configs = [torch.cat(cs, dim=0) for cs in zip(*conf_hist)]
+        return self.task_f.rounded_sorted_configs(configs, dedup_set=self._dict_conf_hist)
+
+    def optimize_step(self, step: int):
         # 1. Compute loss.
         # perfs: [n_sketches, n_configs]
         # constraints: [n_sketches] x [n_configs, n_constraints]
         perfs, constraints = self.task_f.forward(self.configs)
-        if self._step_idx % 10 == 0:
+        if step % 20 == 0:
             to_perf = lambda x: self.task_f.perf_model.output_to_performance(self.task_f.flops, x)
             min_perfs = [to_perf(p) for p in perfs.min(dim=1).values.tolist()]
             max_perfs = [to_perf(p) for p in perfs.max(dim=1).values.tolist()]
             _logger.info(f"min perf={min_perfs}, max perf={max_perfs}")
-        self._step_idx += 1
         # Constraints are good when <= 0.
         penalties = [(cs.relu() ** 2).sum() for cs in constraints]
-        # Model predicts a performance score (higher is better)
-        # Need to invert it into something lower-better.
-        loss = torch.sum(-perfs) + self.CK * sum(penalties)
-        # 2. Keep a history of these values.
-        self._configs.append([c.clone().detach() for c in self.configs])
-        # 3. Backprop and update.
-        loss.backward()
-        self.optim.step()
+        # 2. Backprop and update.
         self.optim.zero_grad()
+        for config, perf, penalty in zip(self.configs, perfs, penalties):
+            # Model predicts a performance score (higher is better)
+            # Need to invert it into something lower-better.
+            cost_grads = torch.autograd.grad(-perf.sum(), config, retain_graph=True)[0]
+            penalty_grads = torch.autograd.grad(penalty, config, retain_graph=True)[0]
+            pgrad_norm = penalty_grads.norm(dim=1)
+            pscale = self.GRAD_RATIO_TARGET * cost_grads.norm(dim=1) / pgrad_norm
+            pscale = torch.where(pgrad_norm == 0, torch.ones_like(pscale), pscale)
+            grad = cost_grads + pscale.unsqueeze(1) * penalty_grads
+            config.grad = grad
+        self.optim.step()
         if self.lr_sched is not None:
             self.lr_sched.step()
 
-
-class SingleRoundTaskOptimizer(TaskOptimizer):
-    def __init__(self, task_f: "TaskPerfFunc", n_seeds: int, n_steps: int, lr: float) -> None:
-        configs = task_f.rand_configs(n_seeds)
-        optimizer = optim.Adam(configs, lr)
-        lr_sched = lrs.MultiStepLR(optimizer, milestones=[int(n_steps * 0.6)], gamma=0.2)
-        super().__init__(task_f, configs, optimizer, lr_sched)
-
-    def get_best_configs(self):
-        # configs: [n_sketches] x [n_steps x n_configs, n_params]
-        configs = [torch.cat(cs, dim=0).round() for cs in zip(*self._configs)]
-        return self.task_f.get_best_configs(configs)
-
-
-class MultiRoundTaskOptimizer(TaskOptimizer):
-    def __init__(
-        self,
-        task_f: "TaskPerfFunc",
-        n_seeds: int,
-        n_first_round_steps: int,
-        n_latter_round_steps: int,
-    ) -> None:
-        configs = task_f.rand_configs(n_seeds)
-        optimizer = optim.Adam(configs, lr=0.5)
-        lr_sched = lrs.MultiStepLR(
-            optimizer, milestones=[int(n_first_round_steps * 0.6)], gamma=0.2
-        )
-        super().__init__(task_f, configs, optimizer, lr_sched)
-        self.n_first_round_steps = n_first_round_steps
-        self.n_latter_round_steps = n_latter_round_steps
-        self._dedup_set = set()
-
-    def get_best_configs(self):
-        # configs: [n_sketches] x [n_steps x n_configs, n_params]
-        configs = [torch.cat(cs, dim=0).round() for cs in zip(*self._configs)]
-        return self.task_f.get_best_configs(configs, dedup_set=self._dedup_set)
-
-    def measure_for_dataset(self, n_top: int, n_rand: int, builder: DatasetBuilder):
-        cis: List[ConfigInfo] = self.get_best_configs()
-        rand_indices = (torch.randperm(len(cis) - n_top)[:n_rand] + n_top).tolist()
-        cis = measure_configs_latency_(cis[:n_top] + [cis[i] for i in rand_indices])
+    def measure_configs(
+        self, configs: List["ConfigInfo"], n_top: int, n_rand: int, builder: DatasetBuilder
+    ):
+        top, rest = configs[:n_top], configs[n_top:]
+        rand = [rest[i] for i in torch.randperm(len(rest))[:n_rand].tolist()]
+        to_measure = top + rand
+        _logger.info(f"Measuring {len(to_measure)} ({len(top)} + {len(rand)}) configs")
+        measured = measure_configs_latency_(to_measure)
+        # Update lowest latency
+        lats = [perf.latency_s for c in configs if (perf := c.get_measured_perf()) is not None]
+        this_least_lat = min(lats, default=1e10)
+        prev_least_lat = self.least_lat_history[-1] if self.least_lat_history else 1e10
+        self.least_lat_history.append(min(this_least_lat, prev_least_lat))
+        # Add configs to dataset builder.
         configs_by_sketch = defaultdict(list)
-        for ci in cis:
-            perf = ci.get_measured_perf()
+        for config in measured:
+            perf = config.get_measured_perf()
             if perf is None:
                 continue
-            configs_by_sketch[ci.sketch_f].append((ci.config, perf.latency_us / 1e6))
+            configs_by_sketch[config.sketch_f].append((config.config, perf.latency_s))
         for sketch_f, conf_perfs in configs_by_sketch.items():
             configs, lat_secs = zip(*conf_perfs)
             lat_secs = torch.tensor(list(lat_secs))
             features, _ = sketch_f.features.run_on_initial_configs(configs)
             builder.add_configs_(features, self.task_f.flops, lat_secs, {})
-        return cis[:n_top]  # Only return the top configs.
+        return to_measure[:n_top]  # Only return the top configs.
 
 
 class SketchPerfFunc(nn.Module):
@@ -281,11 +279,10 @@ class ConfigInfo:
             self.measure_input = self.sketch_f.make_measure_inputs([self.config])[0]
         return self.measure_input
 
-    def to_tvm_string(self):
-        mres = self.measure_result
-        if mres is None:
-            mres = ansor.MeasureResult([], 0, "", 0, 0)
-        return dump_record_to_string(self.get_measure_input(), mres)
+    def get_measure_result(self):
+        if self.measure_result is None:
+            return ansor.MeasureResult([], 0, "", 0, 0)
+        return self.measure_result
 
 
 def get_best_configs(configs: List[ConfigInfo]):
@@ -345,19 +342,13 @@ class TaskPerfFunc(nn.Module):
     def rand_configs(self, n: int) -> List[Tensor]:
         return [sketch.features.rand_configs(n).requires_grad_() for sketch in self.sketches]
 
-    def get_best_configs(
+    def rounded_sorted_configs(
         self, configs: List[Tensor], remove_invalid: bool = True, dedup_set: Optional[set] = None
     ):
-        """For each config, get its best version across all sketches.
-
-        `configs` is a list of configs and should have the same length as
-        what `rand_configs` returns (i.e., one Tensor per sketch).
-        """
-
-        # [n_sketches, n_configs]; [n_sketches] x [n_configs, n_constraints]
+        configs = [c.round() for c in configs]
         n_invalid, n_dup = 0, 0
+        # [n_sketches, n_configs]; [n_sketches] x [n_configs, n_constraints]
         perfs, constraints = self.forward(configs)
-        max_perfs, best_sketch_ids = perfs.max(dim=0)
         ret: List[ConfigInfo] = []
         dedup_set = dedup_set or set()
         for idx, sketch in enumerate(self.sketches):
@@ -365,21 +356,20 @@ class TaskPerfFunc(nn.Module):
             nan_or_inf = torch.any(torch.isnan(configs_) | torch.isinf(configs_), dim=1)
             violates_cons = torch.sum(torch.relu(constraints[idx]) ** 2, dim=1) > 0
             invalid = nan_or_inf | violates_cons
-            sketch_mask = best_sketch_ids == idx
             if remove_invalid:
-                n_invalid += torch.sum(sketch_mask & invalid).item()
-                sketch_mask &= ~invalid
-            for conf_i in torch.nonzero(sketch_mask).squeeze(1):
-                config_dict = sketch.features.inv_transform_config(configs_[conf_i])
+                n_invalid += torch.sum(invalid).item()
+                configs_ = configs_[~invalid]
+            for config, perf in zip(configs_, perfs[idx]):
+                config_dict = sketch.features.inv_transform_config(config)
                 config_kvs = tuple(sorted(config_dict.items(), key=lambda x: x[0]))
                 if config_kvs in dedup_set:
                     n_dup += 1
                     continue
                 dedup_set.add(config_kvs)
-                perf = self.perf_model.output_to_performance(self.flops, max_perfs[conf_i].item())
+                perf = self.perf_model.output_to_performance(self.flops, perf.item())
                 ret.append(ConfigInfo(config_dict, sketch, perf))
-        _logger.info(
-            f"get_best_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
+        _logger.debug(
+            f"get_sorted_configs: n_invalid={n_invalid}, n_dup={n_dup}, n_configs={len(ret)}"
         )
         return sorted(ret, key=lambda x: x.pred_perf, reverse=True)
 

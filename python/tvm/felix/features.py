@@ -257,9 +257,7 @@ class RandConfigMaker:
 
 def safe_log(x: torch.Tensor):
     # To prevent Infs and NaNs in the result, use this:
-    # log(x)        if x >= 1
-    # -log(2 - x)   otherwise (x <= 1, 2 - x >= 1)
-    return torch.clamp_min(x, 1).log() - torch.clamp_min(2 - x, 1).log()
+    return torch.clamp_min(x, 1).log()
 
 
 class TorchExprRunner:

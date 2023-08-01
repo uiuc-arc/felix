@@ -83,20 +83,19 @@ class AnsorMLPModel(PythonBasedModel):
 @dataclass
 @total_ordering
 class LatAndThruput:
-    latency_us: float
+    latency_s: float
     thruput_tflops: float
 
     @classmethod
     def from_thruput(cls, flops: float, thruput_tflops: float):
         thruput_flops = thruput_tflops * 1e12
-        latency_us = flops / thruput_flops * 1e6
-        return cls(latency_us, thruput_tflops)
+        latency_s = flops / thruput_flops
+        return cls(latency_s, thruput_tflops)
 
     @classmethod
     def from_latency_s(cls, flops: float, latency_s: float):
-        latency_us = latency_s * 1e6
         thruput_tflops = flops / latency_s / 1e12
-        return cls(latency_us, thruput_tflops)
+        return cls(latency_s, thruput_tflops)
 
     def __lt__(self, other) -> bool:
         if not isinstance(other, LatAndThruput):
@@ -104,7 +103,7 @@ class LatAndThruput:
         return self.thruput_tflops < other.thruput_tflops
 
     def __repr__(self) -> str:
-        return f"({self.latency_us:.2f} us, {self.thruput_tflops:.4f} TFLOPs)"
+        return f"({self.latency_s * 1e6:.2f} us, {self.thruput_tflops:.4f} TFLOPs)"
 
 
 @dataclass
@@ -271,6 +270,9 @@ class DatasetBuilder:
         features = torch.cat(self.features, dim=0)
         labels = torch.tensor(self.labels).float()
         return SegmentDataset(seg_size, features, labels, conf_meta, use_latency)
+
+    def __len__(self):
+        return len(self.labels)
 
 
 class SegmentDataset(data.Dataset):
