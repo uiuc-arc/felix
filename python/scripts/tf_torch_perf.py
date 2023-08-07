@@ -22,6 +22,8 @@ def get_torch_network(name: str, batch_size: int):
     elif name == "vit":
         network, input_size = nn.vit()
         inputs = torch.randn(batch_size, *input_size)
+    elif name == "llama_100":
+        network, inputs = nn.llama()
     else:
         raise ValueError(f"Invalid network: {name}")
     return network, inputs
