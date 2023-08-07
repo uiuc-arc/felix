@@ -51,12 +51,13 @@ class Optimizer:
         log_file: Optional[PathLike] = None,
     ):
         lr_sched_f = lambda optim: lrs.MultiStepLR(
-            optim, milestones=[int(n_grad_steps * 0.6)], gamma=0.2
+            optim, milestones=[int(n_grad_steps * 0.3)], gamma=0.2
         )
         optims = [
             SingleTaskOptimizer(perf_f, n_config_seeds, lr_sched_f) for perf_f, _, _ in self.tasks
         ]
-        self.output_file = log_file
+        if log_file is not None:
+            self.output_file = Path(log_file)
         # A round of warmup for each task
         for idx in range(len(self.tasks)):
             self._do_one_task_one_round(idx, optims[idx], n_grad_steps, measure_per_round, 0)
@@ -65,7 +66,7 @@ class Optimizer:
         while self.n_measure < n_measurements and len(self.dead_tasks) < len(self.tasks):
             next_task = self._gradient_sched(optims)
             self._do_one_task_one_round(
-                next_task, optims[next_task], n_grad_steps, measure_per_round, 0
+                next_task, optims[next_task], n_grad_steps // 4, measure_per_round, 0
             )
             self._print_total_latency(optims)
         self._summarize(optims, log_file)
@@ -89,20 +90,22 @@ class Optimizer:
         _logger.info("Total latency: %.2f us", total_lat)
 
     def _do_one_task_one_round(
-        self, task_idx: int, optimizer, n_steps: int, n_top: int, n_rand: int
+        self, task_idx: int, optimizer, n_steps: int, n_top: int, n_rand: int, train: bool = True
     ):
         _, weight, idx = self.tasks[task_idx]
         _logger.info(f"Round {self.n_rounds} (task {idx}):")
         # train performance model
-        if len(self.data_builder) < 32 * 4:
+        if not train:
+            _logger.info(f"Skipping training")
+        elif len(self.data_builder) < 128 * 2:
             _logger.info(f"Dataset size {len(self.data_builder)} is too small, skipping training")
         else:
             dataset = self.data_builder.to_dataset()
+            if self.output_file is not None:
+                torch.save(dataset, self.output_file.with_suffix(".pkl"))
             n_batches = int(30000 / len(dataset))
             n_early_stop = n_batches // 5
-            self.perf_model.train_self(
-                self.data_builder.to_dataset(), 32, n_batches, n_early_stop, 1e-4
-            )
+            self.perf_model.train_self(dataset, 32, n_batches, n_early_stop, 1e-4)
         sorted_configs = optimizer.optimize_round(n_steps)
         measured = optimizer.measure_configs(sorted_configs, n_top, n_rand, self.data_builder)
         if self.output_file is not None:
@@ -167,6 +170,8 @@ class SingleTaskOptimizer:
         self._dict_conf_hist = set()
 
     def optimize_round(self, n_steps: int):
+        for c0, c1 in zip(self.configs, self.task_f.rand_configs(self.n_seeds)):
+            c0.data = c1.data.clone()
         # conf_hist: [n_steps] x [n_sketches] x [n_configs, n_params]
         conf_hist: List[List[Tensor]] = []
         for step_idx in range(n_steps):
@@ -229,7 +234,8 @@ class SingleTaskOptimizer:
             configs, lat_secs = zip(*conf_perfs)
             lat_secs = torch.tensor(list(lat_secs))
             features, _ = sketch_f.features.run_on_initial_configs(configs)
-            builder.add_configs_(features, self.task_f.flops, lat_secs, {})
+            mask = (torch.isnan(features) | torch.isinf(features)).any(dim=1).any(dim=1)
+            builder.add_configs_(features[mask], self.task_f.flops, lat_secs[mask], {})
         return to_measure[:n_top]  # Only return the top configs.
 
 
@@ -306,7 +312,7 @@ def measure_configs_latency_(configs: List[ConfigInfo]):
 
 class TaskPerfFunc(nn.Module):
     def __init__(self, task: SymTask, sizes: Dict[str, int], perf_model: MLPModelPLWrapper) -> None:
-        from .sym_dag import Conv
+        from .sym_dag import Conv, Dense, TransposeConv2d
 
         super().__init__()
         self.sym_task = task
@@ -315,7 +321,7 @@ class TaskPerfFunc(nn.Module):
 
         # HACK: remove first sketch of Conv2/3d as its performance tends to be overestimated
         # and can actually be selected instead of the second sketch when it should not.
-        has_conv = any(isinstance(n, Conv) for n in task.dag_nodes())
+        has_conv = any(isinstance(n, (Conv, Dense, TransposeConv2d)) for n in task.dag_nodes())
         sketches = task.sketches[1:] if has_conv else task.sketches
         sketches = [SketchPerfFunc(self, sketch, perf_model) for sketch in sketches]
         self._sketches = nn.ModuleList(sketches)

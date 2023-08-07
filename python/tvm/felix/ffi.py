@@ -117,4 +117,6 @@ def state_from_config(
 def measure_performance(
     measurer: ProgramMeasurer, mis: List[ansor.MeasureInput]
 ) -> List[ansor.MeasureResult]:
+    if not mis:
+        return []
     return _felix.MeasurePerformance(measurer, mis)

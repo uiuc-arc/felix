@@ -260,12 +260,17 @@ def safe_log(x: torch.Tensor):
     return torch.clamp_min(x, 1).log()
 
 
+def safe_div(x: torch.Tensor, y: torch.Tensor):
+    y = y.sign() * torch.clamp_min(y.abs(), 1e-6)
+    return x / y
+
+
 class TorchExprRunner:
     TIR_OP_TORCH_FN = {
         tir.Add: (torch.add, ["a", "b"]),
         tir.Sub: (torch.sub, ["a", "b"]),
         tir.Mul: (torch.mul, ["a", "b"]),
-        tir.Div: (torch.div, ["a", "b"]),
+        tir.Div: (safe_div, ["a", "b"]),
         tir.Min: (torch.minimum, ["a", "b"]),
         tir.Max: (torch.maximum, ["a", "b"]),
         tir.Cast: (lambda x: x, ["value"]),
