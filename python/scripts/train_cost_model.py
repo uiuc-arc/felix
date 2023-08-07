@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 from tvm import felix
+import tvm
 from tvm.auto_scheduler.cost_model import (
     DatasetBuilder,
     SegmentDataset,
@@ -117,7 +118,12 @@ def _add_felix_configs(
     for backbone, configs_ in utils.group_configs_by_backbone(inp_res_pairs).items():
         sketch = sym_task.find_sketch(backbone)
         assert sketch is not None
-        feature_f = sketch.fetch_features(inst.sizes, prime_factorize=False)
+        try:
+            feature_f = sketch.fetch_features(inst.sizes)
+        except tvm.TVMError as e:
+            # Mostly to account for factorization errors
+            logger.warning(f"Failed to fetch features for {inst.idx} ({sym_task}): {e}")
+            continue
         assert feature_f is not None
         var_values = [dict(ffi.extract_config_dict(inp.state)) for inp, _ in configs_]
         our_feats, _ = feature_f.run_on_initial_configs(var_values)
@@ -326,7 +332,7 @@ def train_mlp(
     assert isinstance(dataset_, SegmentDataset)
     # We don't need this and manipulating it is slow; setting it to None will speed up the training.
     dataset_.conf_meta = None
-    pred_model = felix.MLPModelPLWrapper(dataset_.features.shape[1], loss_f, not use_flops)
+    pred_model = felix.MLPModelPLWrapper(dataset_.features.shape[1], loss_f, not use_flops, batch_size=32)
     pred_model.set_dataset_(select_dataset_by_lat(dataset_, min_lat, max_lat), train_ratio)
     val_loss = pred_model.val_loss_name
     filename = "epoch={epoch:02d}-loss={%s:.4f}" % val_loss

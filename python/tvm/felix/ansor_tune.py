@@ -9,7 +9,7 @@ from tvm.auto_scheduler.task_scheduler import TaskScheduler, TaskSchedulerCallba
 from . import utils
 
 logger = logging.getLogger(__file__)
-__all__ = ["ansor_tune_full", "ansor_tune_one_round", "get_ansor_best", "make_ansor_tuner"]
+__all__ = ["ansor_tune_full", "ansor_tune_one_round", "get_config_best", "make_ansor_tuner"]
 
 
 def ansor_tune_full(
@@ -84,7 +84,7 @@ def ansor_tune_one_round(
             tuner.best_ct = tuner.ct
 
 
-def get_ansor_best(tasks: List[utils.AnsorTaskWeight], config_file: utils.PathLike):
+def get_config_best(tasks: List[utils.AnsorTaskWeight], config_file: utils.PathLike):
     tasks_by_key = {task.workload_key: idx for idx, (task, _) in enumerate(tasks)}
     configs = []
     for inp, res in ansor.RecordReader(str(config_file)):
