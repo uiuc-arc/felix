@@ -15,14 +15,16 @@
 # Locate cargo instance
 find_program(CARGO cargo REQUIRED)
 
-function(build_rust RUST_NAME RUST_SOURCE)
-    message(STATUS "[RUST] Building Rust project '${RUST_NAME}' from '${RUST_SOURCE}' into '${CMAKE_BINARY_DIR}/${RUST_NAME}'")
+function(build_rust RUST_NAME RUST_DIR)
+    message(STATUS "[RUST] Building Rust project '${RUST_NAME}' from '${RUST_DIR}' into '${CMAKE_BINARY_DIR}/${RUST_NAME}'")
     # Set cargo output dir to cmake binary dir (simplifies cleaning etc.)
     set(ARGS --target-dir ${CMAKE_BINARY_DIR}/${RUST_NAME})
     # Native target builds into /target
     set(_RUST_TARGETDIR ${CMAKE_BINARY_DIR}/${RUST_NAME})
     # Native target requires pthread and dl
     set(RUST_LIBS pthread dl)
+    # List all files under the given Rust dir.
+    file(GLOB RUST_SRCS ${RUST_DIR}/*)
 
     # Add release or debug args
     message(STATUS "[RUST] Detected release build")
@@ -35,8 +37,8 @@ function(build_rust RUST_NAME RUST_SOURCE)
         "RUST_HEADER_DIR=${_RUST_TARGETDIR}"
         "RUST_HEADER_NAME=${RUST_NAME}.bin"
         ${CARGO} build ${ARGS}
-        WORKING_DIRECTORY ${RUST_SOURCE}
-        DEPENDS ${RUST_SOURCE}/*
+        WORKING_DIRECTORY ${RUST_DIR}
+        DEPENDS ${RUST_SRCS}
     )
     add_custom_target(
         ${RUST_NAME}
@@ -47,13 +49,14 @@ function(build_rust RUST_NAME RUST_SOURCE)
     set(_TEST_CMD "${RUST_NAME}-test")
     add_custom_target(${_TEST_CMD} 
         COMMAND ${CARGO} test ${ARGS}
-        WORKING_DIRECTORY ${RUST_SOURCE}
-        DEPENDS ${RUST_SOURCE}/*)
+        WORKING_DIRECTORY ${RUST_DIR}
+        DEPENDS ${RUST_SRCS}
+    )
     # Add a target to clean the rust library
     set(_CLEAN_CMD "${RUST_NAME}-clean")
     add_custom_target(${_CLEAN_CMD} 
         COMMAND ${CARGO} clean ${ARGS}
-        WORKING_DIRECTORY ${RUST_SOURCE}
+        WORKING_DIRECTORY ${RUST_DIR}
     )
 
     # Include the C header output dir
