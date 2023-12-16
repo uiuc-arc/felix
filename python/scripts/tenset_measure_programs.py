@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from tvm import auto_scheduler as ansor
 from tvm import felix
 from tvm.auto_scheduler.feature import get_per_store_features_from_states
@@ -116,7 +116,7 @@ def measure_configs(inps, runners, output_file):
         ress = ffi.measure_performance(measurer, inps_.tolist())
         for inp, res in zip(inps_, ress):
             if res.error_no != 0:
-                logger.info(f"Error: {res.error_no} ...{res.error_msg[-64:]}")
+                logger.info(f"Error: {res.error_no} {res.error_msg}")
                 continue
             inp_res_pairs.append((inp, res))
 
@@ -180,10 +180,9 @@ def main():
         "n_tasks": 100,
         "task_groups": ["Conv2d", "Dense", "DepthwiseConv2d"],
         "configs_per_round": 64,
-        "best_configs": [56] * 2,
-        "devices": [0, 1],
-        "initial_dataset": None,
-        "initial_model": "lightning_logs/a5000/measure_records/bootstrap/epoch=138-loss=0.3916.ckpt",
+        "n_rounds": 2,
+        "devices": [0],
+        "config_select": None,
     }
 
     seed_all(0)
@@ -194,25 +193,14 @@ def main():
     tasks = enumerate_tasks(params["task_groups"], params["n_tasks"])
 
     runners = [ansor.measure.LocalRunner(**RUNNER_KWARGS, device=idx) for idx in params["devices"]]
-    n_confs, dataset_path = params["configs_per_round"], params["initial_dataset"]
+    n_confs = params["configs_per_round"]
     dbuilder = felix.DatasetBuilder()
-    if dataset_path is not None:
-        dataset = torch.load(dataset_path)
-        assert isinstance(dataset, ansor.cost_model.SegmentDataset)
-        dbuilder.add_dataset(dataset)
-    if (model_ckpt := params["initial_model"]) is not None:
-        cost_model = felix.MLPModelPLWrapper.load_from_checkpoint(model_ckpt)
-        assert cost_model.use_latency
+    if (config_select := params["config_select"]) is not None:
+        raise NotImplementedError("TODO: Implement config selection")
     else:
-        if dataset_path is None:
-            dataset = measure_on_all_tasks(
-                tasks, dbuilder, runners, MEASURE_RECORD_FOLDER / "bootstrap", n_confs, 0
-            )
-        cost_model = felix.MLPModelPLWrapper(n_features=164)
-        cost_model.train_self(dbuilder.to_dataset(), 512, 200, 10, 1e-4)
-    for n_best in tqdm(params["best_configs"], leave=None):
-        prefix = MEASURE_RECORD_FOLDER / "full"
-        measure_on_all_tasks(tasks, dbuilder, runners, prefix, n_confs, n_best, cost_model)
+        for _ in trange(params["n_rounds"], leave=None):
+            prefix = MEASURE_RECORD_FOLDER / "full"
+            measure_on_all_tasks(tasks, dbuilder, runners, prefix, n_confs, 0)
 
 
 if __name__ == "__main__":
