@@ -251,3 +251,4 @@ jvm/target
 
 lightning_logs/
 .dataset_cache/
+.trunk
