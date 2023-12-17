@@ -2,28 +2,35 @@ import logging
 import random
 from collections import defaultdict
 from dataclasses import dataclass
+from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import List, Optional
 
-import numpy as np
 import torch
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from tvm import auto_scheduler as ansor
 from tvm import felix
-from tvm.auto_scheduler.feature import get_per_store_features_from_states
-from tvm.felix import ffi, utils
+from tvm.auto_scheduler.measure import (
+    BuildResult,
+    LocalBuilder,
+    LocalRunner,
+    MeasureInput,
+)
+from tvm.auto_scheduler.measure_record import save_records
 
-TARGET = str(utils.TARGET.model)
+TARGET = str(felix.utils.TARGET.model)
 TENSET_TASKS_PKL = Path("lightning_logs/tenset/network_info/all_tasks.pkl")
 TO_MEASURE_PROGRAM_FOLDER = Path("lightning_logs/tenset/to_measure_programs")
 MEASURE_RECORD_FOLDER = Path(f"lightning_logs/{TARGET}/measure_records")
 RUNNER_KWARGS = {
     "timeout": 15,
-    "min_repeat_ms": 100,
-    "repeat": 1,
+    "min_repeat_ms": 30,
+    "repeat": 3,
     "enable_cpu_cache_flush": False,
 }
-BUILDER = ansor.measure.LocalBuilder()
+BUILDER = LocalBuilder()
+MINI_BATCH_SIZE = 32
+MAX_QSIZE = 1024
 
 logger = logging.getLogger(__name__)
 
@@ -78,93 +85,67 @@ def enumerate_tasks(groups: List[str], n_tasks_per_group: Optional[int]) -> List
     return ret_tasks
 
 
-def get_confs_to_measure(taskr: TaskRecord, cost_model, n_total, n_best):
-    task = taskr.ansor_task
-    inps, _ = ansor.RecordReader(taskr.tenset_src.as_posix()).read_lines()
-    if cost_model is None:
-        assert n_best == 0
-        best_idx = torch.tensor([])
-        rand_idx = torch.randperm(len(inps))[:n_total]
-    else:
-        features = get_per_store_features_from_states([inp.state for inp in inps], task)
-        features = [torch.tensor(f.astype(np.float32)) for f in features]
-        predictions = cost_model.forward_on_batch(features)
-        sorted_indices = torch.argsort(predictions, descending=True)
-        best_idx, rest = sorted_indices[:n_best], sorted_indices[n_best:]
-        n_rand = n_total - n_best
-        assert n_rand >= 0
-        rand_idx = rest[torch.randperm(len(rest))[:n_rand]]
-        pred_usec = 1e6 / torch.exp(predictions[best_idx])
-        logger.info(f"{n_best} best configs with predicted costs (usecs)\n  %s", pred_usec)
-    # Do this to set the target/target_host settings to ours in the measure input:
-    ret = [ansor.MeasureInput(task, inps[i].state) for i in best_idx.tolist() + rand_idx.tolist()]
-    logger.info("Got %d configs (%d best and %d random)", len(ret), len(best_idx), len(rand_idx))
-    return ret
+def _measure_configs(queue: Queue, runner: LocalRunner):
+    mis: List[MeasureInput] = []
+    bresults: List[BuildResult] = []
+    out_files: List[Path] = []
 
-
-def measure_configs(inps, runners, output_file):
-    from threading import Thread
-
-    def measure_configs(runner, inps_):
-        measurer = ansor.measure.ProgramMeasurer(
-            BUILDER,
-            runner,
-            [ansor.RecordToFile(str(output_file))],
-            verbose=0,
-            max_continuous_error=16,
-        )
-        ress = ffi.measure_performance(measurer, inps_.tolist())
-        for inp, res in zip(inps_, ress):
+    def batch_operate():
+        assert len(mis) == len(bresults) == len(out_files)
+        logger.info("Fetched %d configs to measure from the queue", len(mis))
+        logger.info("%d configs in the queue to be measured", queue.qsize())
+        mres = runner.run(mis, bresults)
+        n_suc = 0
+        for inp, res, out_file in zip(mis, mres, out_files):
             if res.error_no != 0:
-                logger.info(f"Error: {res.error_no} {res.error_msg}")
-                continue
-            inp_res_pairs.append((inp, res))
+                logger.debug(f"Error: {res.error_no} {res.error_msg}")
+            else:
+                n_suc += 1
+            save_records(out_file.as_posix(), [inp], [res])
+        logger.info("%d out of %d configs measured successfully", n_suc, len(mis))
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    inp_res_pairs = []
-    chunks = np.array_split(np.array(inps), len(runners))
-    threads = [
-        Thread(target=measure_configs, args=(runner, inps_))
-        for inps_, runner in zip(chunks, runners)
-    ]
-    for th in threads:
-        th.start()
-    for th in threads:
-        th.join()
-    logger.info(f"Measurement finished for task; {len(inp_res_pairs)} succeeded out of {len(inps)}")
-    return inp_res_pairs
+    while True:
+        next_item = queue.get()
+        if next_item is None:
+            break
+        br, mi, out_file = next_item
+        mis.append(mi)
+        bresults.append(br)
+        out_files.append(out_file)
+        if len(mis) == MINI_BATCH_SIZE:
+            batch_operate()
+            mis, bresults, out_files = [], [], []
+    if mis:
+        batch_operate()
 
 
-def measure_on_all_tasks(tasks, dbuilder, runners, output_prefix, n_total, n_best, cost_model=None):
-    if cost_model is None:
-        assert n_best == 0
+def _produce_configs(queue: Queue, tasks: List[TaskRecord], n_per_task: int, output_prefix: Path):
     for task in tqdm(tasks, leave=None):
         sym_task, inst = task.sym_task, task.instance
         flops = task.ansor_task.compute_dag.flop_ct
+        output_file = output_prefix / task.output_path
         # fmt: off
         logger.info(
-            "Task %d (%s)\n    FLOPs = %s (ansor), params = %s",
-            inst.idx, sym_task, flops, inst.sizes
+            "Task %d (%s)\n    FLOPs = %s (ansor), params = %s\n    file = %s -> %s",
+            inst.idx, sym_task, flops, inst.sizes, task.tenset_src, output_file
         )
         # fmt: on
-        to_measure = get_confs_to_measure(task, cost_model, n_total, n_best)
-        inp_res_pairs = measure_configs(to_measure, runners, output_prefix / task.output_path)
-        costs = np.array([[float(t) * 1e6 for t in res.costs] for _, res in inp_res_pairs])
-        costs = costs.mean(axis=1)
-        logger.info(
-            "Config costs (us):\n  Best configs: %s\n  Rand configs: %s",
-            costs[:n_best],
-            costs[n_best:],
-        )
-        felix.add_to_dataset_builder(dbuilder, sym_task, inst, inp_res_pairs, True)
-        dataset = dbuilder.to_dataset()
-        if cost_model is not None:
-            if len(dataset) < 512:
-                logger.info("Not enough data to train cost model")
+        inps, _ = ansor.RecordReader(task.tenset_src.as_posix()).read_lines()
+        rand_idx = torch.randperm(len(inps))[:n_per_task]
+        # Do this to set the target/target_host settings to ours in the measure input:
+        mis = [ansor.MeasureInput(task.ansor_task, inps[i].state) for i in rand_idx.tolist()]
+        logger.info("Randomly selected %d configs", len(mis))
+        build_results: List[BuildResult] = BUILDER.build(mis)
+        assert len(build_results) == len(mis)
+        n_build_suc = 0
+        for br, mi in zip(build_results, mis):
+            if br.error_no != 0:
+                logger.debug(f"Build error: {br.error_no} {br.error_msg}")
             else:
-                cost_model.train_self(dataset, 512, 50, 5, 1e-4)
-    torch.save((dataset := dbuilder.to_dataset()), output_prefix / "ansor_dataset.pkl")
-    return dataset
+                queue.put((br, mi, output_file))  # Wait can happen here
+                n_build_suc += 1
+        logger.info("%d out of %d configs built successfully", n_build_suc, len(mis))
+        logger.info("%d configs in the queue to be measured", queue.qsize())
 
 
 def seed_all(seed: int):
@@ -178,11 +159,10 @@ def seed_all(seed: int):
 def main():
     params = {
         "n_tasks": 100,
-        "task_groups": ["Conv2d", "Dense", "DepthwiseConv2d"],
-        "configs_per_round": 64,
-        "n_rounds": 2,
-        "devices": [0],
-        "config_select": None,
+        "task_groups": ["Conv2d", "Dense", "BatchMatmul", "DepthwiseConv2d"],
+        "configs_per_task": 256,
+        "devices": [0, 1, 2, 3],
+        "config_selector": None,
     }
 
     seed_all(0)
@@ -192,15 +172,31 @@ def main():
     logger.info("Loading all tasks...")
     tasks = enumerate_tasks(params["task_groups"], params["n_tasks"])
 
-    runners = [ansor.measure.LocalRunner(**RUNNER_KWARGS, device=idx) for idx in params["devices"]]
-    n_confs = params["configs_per_round"]
-    dbuilder = felix.DatasetBuilder()
-    if (config_select := params["config_select"]) is not None:
+    if (config_select := params["config_selector"]) is not None:
         raise NotImplementedError("TODO: Implement config selection")
-    else:
-        for _ in trange(params["n_rounds"], leave=None):
-            prefix = MEASURE_RECORD_FOLDER / "full"
-            measure_on_all_tasks(tasks, dbuilder, runners, prefix, n_confs, 0)
+
+    n_confs = params["configs_per_task"]
+    output_prefix = MEASURE_RECORD_FOLDER / "full"
+    task_config_queue = Queue(MAX_QSIZE)
+    config_producer = Process(
+        target=_produce_configs, args=(task_config_queue, tasks, n_confs, output_prefix)
+    )
+    config_producer.start()
+    config_consumers = []
+    for device_idx in params["devices"]:
+        runner = ansor.measure.LocalRunner(**RUNNER_KWARGS, device=device_idx)
+        config_consumer = Process(target=_measure_configs, args=(task_config_queue, runner))
+        config_consumer.start()
+        config_consumers.append(config_consumer)
+    logger.info("Started %d runners", len(config_consumers))
+
+    config_producer.join()
+    logger.info("Config producer finished")
+    for config_consumer in config_consumers:
+        # Put a None for every consumer to signal that we're done,
+        # and wait for them to finish.
+        task_config_queue.put(None)
+        config_consumer.join()
 
 
 if __name__ == "__main__":
