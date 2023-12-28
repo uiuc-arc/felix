@@ -1,4 +1,5 @@
 import logging
+import shutil
 from pathlib import Path
 
 import torch
@@ -48,17 +49,22 @@ def main():
     work_dir = Path(
         "./lightning_logs", device, "tuning_results", f"{args.network}_{args.batch_size}"
     )
-    cost_model = f"lightning_logs/{device}/cost_models/xgb.pkl"
     felix.init_logging(work_dir, True)
+    to_cost_model = work_dir / "xgb.pkl"
+    if (from_cost_model := Path(f"lightning_logs/{device}/cost_models/xgb.pkl")).is_file():
+        logger.info(f"Cost model: {from_cost_model} -> {to_cost_model}")
+        shutil.copy(from_cost_model, to_cost_model)
     tasks_pkl = work_dir / "ansor_tasks.pkl"
     if tasks_pkl.is_file():
+        logger.info(f"Loaded previously extracted tasks from {tasks_pkl}")
         tasks = felix.utils.load_and_register_ansor_tasks(tasks_pkl, True)
     else:
+        logger.info(f"Extracting tasks from {args.network}...")
         model, inputs = get_network(args.network, args.batch_size)
         tasks = felix.utils.extract_ansor_tasks(model, inputs, save_to=tasks_pkl)
         del model
     iters = args.iters_per_layer * len(tasks)
-    felix.ansor_tune_full(tasks, cost_model, work_dir / "ansor_configs.json", iters)
+    felix.ansor_tune_full(tasks, to_cost_model, work_dir / "ansor_configs.json", iters)
 
 
 if __name__ == "__main__":
