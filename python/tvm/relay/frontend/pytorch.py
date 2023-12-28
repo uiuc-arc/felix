@@ -21,9 +21,9 @@
 """PT: PyTorch frontend."""
 import functools
 import itertools
+import logging
 import math
 import sys
-import logging
 
 import numpy as np
 import tvm
@@ -40,14 +40,15 @@ from ..loops import while_loop
 from ..prelude import Prelude, StaticTensorArrayOps
 from ..ty import Any, TensorType, TupleType
 from . import qnn_torch
-from .common import AttrCvt, get_relay_op, gru_cell, logger
+from .common import AttrCvt, get_relay_op, gru_cell
 from .common import infer_shape as _infer_shape
 from .common import infer_value as _infer_value
 from .common import infer_value_simulated as _infer_value_simulated
-from .common import lstm_cell, try_infer_value, unbind
-from .pytorch_utils import is_version_greater_than, getattr_attr_name
+from .common import logger, lstm_cell, try_infer_value, unbind
+from .pytorch_utils import getattr_attr_name, is_version_greater_than
 
 __all__ = ["from_pytorch"]
+
 
 # This returns a "subgraph" which puts variables whenever
 # the type is known. It also records things to map the input
@@ -324,9 +325,10 @@ class PyTorchOpConverter:
             start = _expr.const(0, dtype)
             stop = _get_value(inputs[0], dtype)
             step = _expr.const(1, dtype)
-        elif len(inputs) == 7:
-            types = [_get_type(inputs[i], input_types[i]) for i in range(3)]
-            if inputs[3] is not None:
+        elif 6 <= len(inputs) <= 7:
+            dtype_idx = len(inputs) - 4
+            types = [_get_type(inputs[i], input_types[i]) for i in range(dtype_idx)]
+            if inputs[dtype_idx] is not None:
                 dtype = _convert_dtype_value(inputs[3])
             elif any([t.startswith("float") for t in types]):
                 dtype = "float32"
@@ -334,9 +336,12 @@ class PyTorchOpConverter:
                 dtype = "int64"
             start = _get_value(inputs[0], dtype)
             stop = _get_value(inputs[1], dtype)
-            step = _get_value(inputs[2], dtype)
+            if dtype_idx == 2:
+                step = _expr.const(1, dtype)
+            else:
+                step = _get_value(inputs[2], dtype)
         else:
-            msg = "Unknown number of arguments (%d) to parse." % (len(inputs))
+            msg = "Unknown number of arguments (%d, %s) to parse." % (len(inputs), inputs)
             raise AssertionError(msg)
 
         return _op.transform.arange(start=start, stop=stop, step=step, dtype=dtype)
@@ -809,7 +814,7 @@ class PyTorchOpConverter:
         # with tanh and third order polynomials, but this is "true" gelu
         return data * (
             _expr.const(0.5, dtype=dtype)
-            + _op.erf(data * _expr.const(0.5 ** 0.5, dtype=dtype)) * _expr.const(0.5, dtype=dtype)
+            + _op.erf(data * _expr.const(0.5**0.5, dtype=dtype)) * _expr.const(0.5, dtype=dtype)
         )
 
     def selu(self, inputs, input_types):
@@ -1624,7 +1629,6 @@ class PyTorchOpConverter:
         return _op.split(data, indeces, axis)
 
     def matmul(self, inputs, input_types):
-
         inputs_0 = inputs[0]
         inputs_1 = inputs[1]
 
@@ -3276,7 +3280,7 @@ class PyTorchOpConverter:
             # Update loop variables using the prev iteration outputs
             assert len(current_vals) == num_block_inputs + len(free_vars)
 
-            for (i, val) in enumerate(current_vals):
+            for i, val in enumerate(current_vals):
                 if i < num_block_inputs:
                     outputs[block_input_names[i]] = val
                 else:

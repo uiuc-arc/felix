@@ -195,6 +195,6 @@ class CustomLlamaForCausalLM(LlamaForCausalLM):
 
 
 def llama():
-    network = CustomLlamaForCausalLM(LlamaConfig())
+    network = CustomLlamaForCausalLM(LlamaConfig(attn_implementation="eager"))
     inputs = torch.randint(0, 20000, (1, 100))
     return network, inputs
