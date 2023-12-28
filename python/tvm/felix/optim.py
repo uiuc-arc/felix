@@ -235,7 +235,7 @@ class SingleTaskOptimizer:
             lat_secs = torch.tensor(list(lat_secs))
             features, _ = sketch_f.features.run_on_initial_configs(configs)
             mask = (torch.isnan(features) | torch.isinf(features)).any(dim=1).any(dim=1)
-            builder.add_configs_(features[mask], self.task_f.flops, lat_secs[mask], {})
+            builder.add_configs_(features[~mask], self.task_f.flops, lat_secs[~mask], {})
         return to_measure[:n_top]  # Only return the top configs.
 
 
