@@ -37,10 +37,9 @@ class Optimizer:
             for sym, inst in tasks
         ]
         self.perf_model = perf_model
-        self.dead_tasks = []
         self.n_measure, self.n_rounds = 0, 0
         self.data_builder = DatasetBuilder()
-        self.output_file = None
+        self.output_file: Path | None = None
 
     def tune(
         self,
@@ -50,9 +49,9 @@ class Optimizer:
         measure_per_round: int,
         log_file: Optional[PathLike] = None,
     ):
-        lr_sched_f = lambda optim: lrs.MultiStepLR(
-            optim, milestones=[int(n_grad_steps * 0.3)], gamma=0.2
-        )
+        def lr_sched_f(optim):
+            return lrs.MultiStepLR(optim, milestones=[int(n_grad_steps * 0.3)], gamma=0.2)
+
         optims = [
             SingleTaskOptimizer(perf_f, n_config_seeds, lr_sched_f) for perf_f, _, _ in self.tasks
         ]
@@ -63,7 +62,7 @@ class Optimizer:
             self._do_one_task_one_round(idx, optims[idx], n_grad_steps, measure_per_round, 0)
         self._print_total_latency(optims)
         # Keep tuning till we run out of budget
-        while self.n_measure < n_measurements and len(self.dead_tasks) < len(self.tasks):
+        while self.n_measure < n_measurements:
             next_task = self._gradient_sched(optims)
             self._do_one_task_one_round(
                 next_task, optims[next_task], n_grad_steps // 4, measure_per_round, 0
@@ -96,7 +95,7 @@ class Optimizer:
         _logger.info(f"Round {self.n_rounds} (task {idx}):")
         # train performance model
         if not train:
-            _logger.info(f"Skipping training")
+            _logger.info("Skipping training")
         elif len(self.data_builder) < 128 * 2:
             _logger.info(f"Dataset size {len(self.data_builder)} is too small, skipping training")
         else:
@@ -183,12 +182,14 @@ class SingleTaskOptimizer:
         return self.task_f.rounded_sorted_configs(configs, dedup_set=self._dict_conf_hist)
 
     def optimize_step(self, step: int):
+        def to_perf(x):
+            return self.task_f.perf_model.output_to_performance(self.task_f.flops, x)
+
         # 1. Compute loss.
         # perfs: [n_sketches, n_configs]
         # constraints: [n_sketches] x [n_configs, n_constraints]
         perfs, constraints = self.task_f.forward(self.configs)
         if step % 20 == 0:
-            to_perf = lambda x: self.task_f.perf_model.output_to_performance(self.task_f.flops, x)
             min_perfs = [to_perf(p) for p in perfs.min(dim=1).values.tolist()]
             max_perfs = [to_perf(p) for p in perfs.max(dim=1).values.tolist()]
             _logger.info(f"min perf={min_perfs}, max perf={max_perfs}")
@@ -299,9 +300,13 @@ def get_best_configs(configs: List[ConfigInfo]):
 
 
 def measure_configs_latency_(configs: List[ConfigInfo]):
+    from os import environ
+
     from tvm.auto_scheduler.measure import ProgramMeasurer
 
-    measurer = ProgramMeasurer(ansor.LocalBuilder(), make_runner(), [], False)
+    device = int(environ.get("TVM_FELIX_DEVICE", "0"))
+    _logger.info(f"Measuring on device {device}")
+    measurer = ProgramMeasurer(ansor.LocalBuilder(), make_runner(device=device), [], False)
     results = ffi.measure_performance(measurer, [c.get_measure_input() for c in configs])
     for c, result in zip(configs, results):
         if result.error_no != 0:
