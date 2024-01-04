@@ -41,8 +41,11 @@ LoadedConf = Dict[str, Any]
 
 
 def make_runner(**kwargs):
-    # Can be replaced with RPCRunner on specific devices
-    return ansor.measure.LocalRunner(**kwargs)
+    from os import environ
+
+    tracker = environ.get("TVM_TRACKER_HOST", "127.0.0.1")
+    tracker_port = int(environ.get("TVM_TRACKER_PORT", 9190))
+    return ansor.measure.RPCRunner(TARGET.model, tracker, tracker_port, **kwargs)
 
 
 @dataclass

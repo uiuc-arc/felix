@@ -300,13 +300,9 @@ def get_best_configs(configs: List[ConfigInfo]):
 
 
 def measure_configs_latency_(configs: List[ConfigInfo]):
-    from os import environ
-
     from tvm.auto_scheduler.measure import ProgramMeasurer
 
-    device = int(environ.get("TVM_FELIX_DEVICE", "0"))
-    _logger.info(f"Measuring on device {device}")
-    measurer = ProgramMeasurer(ansor.LocalBuilder(), make_runner(device=device), [], False)
+    measurer = ProgramMeasurer(ansor.LocalBuilder(), make_runner(), [], False)
     results = ffi.measure_performance(measurer, [c.get_measure_input() for c in configs])
     for c, result in zip(configs, results):
         if result.error_no != 0:

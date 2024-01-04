@@ -21,14 +21,11 @@ def ansor_tune_full(
     round_n_steps: int = 4,
     round_n_measure: int = 64,
 ):
-    from os import environ
-
     tuner = make_ansor_tuner(tasks, cost_model_path, json_log)
-    device = int(environ.get("TVM_FELIX_DEVICE", "0"))
     tuning_options = ansor.TuningOptions(
         num_measure_trials=n_total_measure,
         num_measures_per_round=round_n_measure,
-        runner=utils.make_runner(device=device),
+        runner=utils.make_runner(),
         measure_callbacks=[ansor.RecordToFile(tuner.load_log_file)],
     )
     tuner.tune(
