@@ -1,12 +1,12 @@
 import numpy as np
-import tensorflow as tf
-import torch
-from torchvision.models import mobilenet_v2, resnet50
-from torchvision.models.video import r3d_18
-from tvm.felix import nn
-import tf_nns
+
 
 def get_torch_network(name: str, batch_size: int):
+    import torch
+    from torchvision.models import mobilenet_v2, resnet50
+    from torchvision.models.video import r3d_18
+    from tvm.felix import nn
+
     if name == "resnet50":
         network = resnet50()
         inputs = torch.randn(batch_size, 3, 256, 256)
@@ -30,6 +30,9 @@ def get_torch_network(name: str, batch_size: int):
 
 
 def get_tf_network(name, batch_size):
+    import tensorflow as tf
+    import tf_nns
+
     if name == "resnet50":
         model = tf.keras.applications.resnet50.ResNet50(weights=None, input_shape=(256, 256, 3))
         return model, tf.random.normal((batch_size, 256, 256, 3))
@@ -88,18 +91,19 @@ def measure_tf_lat_us(model, inputs, number: int, repeat: int):
 
 
 def main():
+    import tensorflow as tf
+
+    # for network in ["resnet50", "mobilenet_v2", "r3d_18", "dcgan", "vit"]:
+    #     model, inputs = get_torch_network(network, 1)
+    #     model = torch.compile(model, mode="max-autotune")
+    #     lats = measure_torch_lat_us(model, inputs, 100, 5)
+    #     print(f"PyTorch {network} (batch_size={1}): {lats.mean():.1f} ± {lats.std():.1f} us")
     for network in ["resnet50", "mobilenet_v2", "r3d_18", "dcgan", "vit"]:
-        for batch_size in [1, 16]:
-            model, inputs = get_torch_network(network, batch_size)
-            lats = measure_torch_lat_us(model, inputs, 100, 5)
-            print(f"PyTorch {network} (batch_size={batch_size}): {lats.mean():.1f} ± {lats.std():.1f} us")
-    for network in ["resnet50", "mobilenet_v2", "r3d_18", "dcgan", "vit"]:
-        for batch_size in [1, 16]:
-            keras_model, inputs = get_tf_network(network, batch_size)
-            tf_model = tf.function(lambda x: keras_model(x))
-            tf_model = tf_model.get_concrete_function(tf.TensorSpec(inputs.shape, inputs.dtype))
-            lats = measure_tf_lat_us(tf_model, inputs, 100, 5)
-            print(f"TensorFlow{network} (batch_size={batch_size}): {lats.mean():.1f} ± {lats.std():.1f} us")
+        keras_model, inputs = get_tf_network(network, 1)
+        tf_model = tf.function(keras_model, jit_compile=True)
+        tf_model = tf_model.get_concrete_function(tf.TensorSpec(inputs.shape, inputs.dtype))
+        lats = measure_tf_lat_us(tf_model, inputs, 100, 5)
+        print(f"TensorFlow {network} (batch_size={1}): {lats.mean():.1f} ± {lats.std():.1f} us")
 
 
 if __name__ == "__main__":
