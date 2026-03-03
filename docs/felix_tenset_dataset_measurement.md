@@ -17,10 +17,10 @@ programs to build a dataset.
 ```bash
 # Download and install Miniconda
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash ~/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
 
-# Create and activate conda environment
-conda create -n felix python=3.13
+# Create and activate the recommended conda environment
+conda env create -f python/env.yaml
 conda activate felix
 ```
 
@@ -38,7 +38,8 @@ source ~/.bashrc
 ### Clone Repository
 
 ```bash
-git clone -b tenset https://gitlab.engr.illinois.edu/yifanz16/felix.git
+# If you have not already cloned Felix:
+git clone https://github.com/uiuc-arc/felix.git
 cd felix
 ```
 
@@ -60,14 +61,13 @@ cp cmake/config.cmake build/
 
 ```bash
 cmake -DCMAKE_BUILD_TYPE=Release -B build/ -S .
-cmake --build build -j64
+cmake --build build -j"$(nproc)"
 ```
 
 ### Install Python Dependencies
 
 ```bash
-pip install -e ".[pytorch,xgboost,highlight]" --config-settings editable_mode=strict
-pip install tqdm
+python -m pip install -e ./python
 ```
 
 ## 3. Dataset Setup
@@ -81,20 +81,20 @@ pip install gdown
 # Download the TenSet dataset
 gdown --fuzzy https://drive.google.com/file/d/1jqHbmvXUrLPDCIqJIaPee_atsPc0ZFFK/view
 
-# Setup dataset directory
-mkdir tenset
-mv dataset_gpu_v3.3.zip tenset/
-cd tenset/
+# Setup dataset directory expected by Felix scripts
+mkdir -p lightning_logs/tenset
+mv dataset_gpu_v3.3.zip lightning_logs/tenset/
+cd lightning_logs/tenset/
 unzip dataset_gpu_v3.3.zip
 mv dataset_gpu/* .
 rm -r dataset_gpu dataset_gpu_v3.3.zip
-cd ..
+cd ../..
 ```
 
 Expected directory structure after setup:
 
 ```text
-tenset/
+lightning_logs/tenset/
 |-- network_info/
 |   `-- all_tasks.pkl
 |-- to_measure_programs/
@@ -110,9 +110,9 @@ tenset/
 # Activate conda environment
 conda activate felix
 
-# Measure all operators
-python3 python/scripts/tenset_measure_progs.py \
-    --tenset-dir ../tenset \
-    --target nvidia/rtx-6000-ada \
-    --devices 0 1
+# Measure programs (uses parameters hard-coded in the script main())
+python3 python/scripts/tenset_measure_programs.py
 ```
+
+To customize task groups, number of tasks/configurations, or GPU devices, edit
+`params` in `python/scripts/tenset_measure_programs.py`.
