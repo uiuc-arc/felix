@@ -30,3 +30,8 @@ these installation steps also apply to this repository.
 Once the setup finishes, you can import Felix in Python as `tvm.felix`.
 Check out the [example file in gallery](gallery/tutorial/felix_tune_network.py)
 for instructions on how to run Felix and optimize a DNN.
+
+## TenSet Dataset Measurement
+
+For dataset setup and measurement scripts, see
+[TenSet Dataset Measurement Guide](docs/felix_tenset_dataset_measurement.md).
